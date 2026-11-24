@@ -1,4 +1,5 @@
 import React, { useState } from 'react';
+import { AuthProvider } from './context/AuthContext';
 import { Navbar } from './components/Navbar';
 import { CatalogPage } from './pages/CatalogPage';
 import { EditalDetailPage } from './pages/EditalDetailPage';
@@ -8,10 +9,13 @@ import { EvaluationQueuePage } from './pages/EvaluationQueuePage';
 import { PreliminaryResultsPage } from './pages/PreliminaryResultsPage';
 import { ExecutiveApprovalPage } from './pages/ExecutiveApprovalPage';
 import { AuditLogsPage } from './pages/AuditLogsPage';
+import { CreateEditalModal } from './components/CreateEditalModal';
 
-export const App: React.FC = () => {
+export const MainLayout: React.FC = () => {
   const [currentPage, setCurrentPage] = useState<'catalog' | 'detail' | 'my-applications' | 'review' | 'evaluation' | 'results' | 'approval' | 'audit'>('catalog');
   const [selectedEditalId, setSelectedEditalId] = useState<number | null>(null);
+  const [isCreateModalOpen, setIsCreateModalOpen] = useState(false);
+  const [refreshKey, setRefreshKey] = useState(0);
 
   const handleSelectEdital = (id: number) => {
     setSelectedEditalId(id);
@@ -23,13 +27,26 @@ export const App: React.FC = () => {
     setCurrentPage(page as any);
   };
 
+  const handleCreateSuccess = () => {
+    setRefreshKey((prev) => prev + 1);
+    setCurrentPage('catalog');
+  };
+
   return (
     <div className="min-h-screen bg-slate-50 flex flex-col font-sans">
-      <Navbar onNavigate={handleNavigate} currentPage={currentPage} />
+      <Navbar 
+        onNavigate={handleNavigate} 
+        currentPage={currentPage}
+        onOpenCreateEdital={() => setIsCreateModalOpen(true)}
+      />
 
       <main className="flex-1">
         {currentPage === 'catalog' && (
-          <CatalogPage onSelectEdital={handleSelectEdital} />
+          <CatalogPage 
+            key={refreshKey}
+            onSelectEdital={handleSelectEdital} 
+            onOpenCreateEdital={() => setIsCreateModalOpen(true)}
+          />
         )}
         {currentPage === 'detail' && selectedEditalId && (
           <EditalDetailPage 
@@ -57,11 +74,25 @@ export const App: React.FC = () => {
         )}
       </main>
 
+      <CreateEditalModal
+        isOpen={isCreateModalOpen}
+        onClose={() => setIsCreateModalOpen(false)}
+        onSuccess={handleCreateSuccess}
+      />
+
       <footer className="bg-white border-t border-slate-200 py-6 text-center text-xs text-slate-500">
         <p className="font-semibold text-slate-700">QUERO &mdash; Quadro Universitário de Estágios Remunerados e Oportunidades</p>
         <p className="mt-1">Sistema Unificado de Seleção e Gestão de Estágios, Monitorias e Bolsas Acadêmicas &middot; v5.0</p>
       </footer>
     </div>
+  );
+};
+
+export const App: React.FC = () => {
+  return (
+    <AuthProvider>
+      <MainLayout />
+    </AuthProvider>
   );
 };
 

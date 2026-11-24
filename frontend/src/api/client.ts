@@ -1,14 +1,24 @@
 import axios from 'axios';
 
 const getBaseUrl = (): string => {
+  // Se estiver rodando no navegador no Render
+  if (typeof window !== 'undefined' && window.location.hostname.includes('onrender.com')) {
+    return 'https://quero-backend.onrender.com/api/v1';
+  }
+
   const envUrl = import.meta.env.VITE_API_BASE_URL || import.meta.env.VITE_API_URL;
   if (!envUrl) {
     return 'http://localhost:8000/api/v1';
   }
-  if (envUrl.startsWith('http://') || envUrl.startsWith('https://')) {
-    return envUrl.endsWith('/api/v1') ? envUrl : `${envUrl}/api/v1`;
+
+  let url = envUrl.trim();
+  if (url === 'quero-backend' || (!url.includes('.') && !url.startsWith('http'))) {
+    url = `https://${url}.onrender.com`;
   }
-  return `https://${envUrl}/api/v1`;
+  if (!url.startsWith('http://') && !url.startsWith('https://')) {
+    url = `https://${url}`;
+  }
+  return url.endsWith('/api/v1') ? url : `${url}/api/v1`;
 };
 
 export const apiClient = axios.create({
