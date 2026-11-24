@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { GraduationCap, Users, Shield, PlusCircle, Check, ChevronDown, UserCircle } from 'lucide-react';
+import { GraduationCap, Users, Shield, PlusCircle, Check, ChevronDown, UserCircle, LogIn, LogOut, KeyRound } from 'lucide-react';
 import { useAuth, UserRole } from '../context/AuthContext';
 
 interface NavbarProps {
@@ -9,7 +9,7 @@ interface NavbarProps {
 }
 
 export const Navbar: React.FC<NavbarProps> = ({ onNavigate, currentPage, onOpenCreateEdital }) => {
-  const { user, role, switchProfile, loading } = useAuth();
+  const { user, role, switchProfile, logout, loading } = useAuth();
   const [dropdownOpen, setDropdownOpen] = useState(false);
 
   const roleColors: Record<UserRole, { bg: string; text: string; label: string; icon: string }> = {
@@ -115,6 +115,19 @@ export const Navbar: React.FC<NavbarProps> = ({ onNavigate, currentPage, onOpenC
               </button>
             </>
           )}
+
+          {/* Aba Explícita de Acesso & Login */}
+          <button
+            onClick={() => onNavigate('login')}
+            className={`px-3 py-1.5 rounded-lg text-xs font-semibold flex items-center space-x-1.5 transition ${
+              currentPage === 'login' 
+                ? 'bg-blue-600 text-white' 
+                : 'text-slate-300 hover:bg-slate-800 hover:text-white'
+            }`}
+          >
+            <KeyRound className="h-3.5 w-3.5" />
+            <span>Login & Perfis</span>
+          </button>
         </nav>
 
         {/* Right Actions: Novo Edital + Profile Switcher */}
@@ -130,75 +143,102 @@ export const Navbar: React.FC<NavbarProps> = ({ onNavigate, currentPage, onOpenC
           )}
 
           {/* User Profile Switcher */}
-          <div className="relative">
+          {!user ? (
             <button
-              onClick={() => setDropdownOpen(!dropdownOpen)}
-              className="flex items-center space-x-2 bg-slate-800 hover:bg-slate-700/80 border border-slate-700 px-3 py-1.5 rounded-lg text-xs font-medium transition"
+              onClick={() => onNavigate('login')}
+              className="flex items-center space-x-1.5 bg-blue-600 hover:bg-blue-700 text-white px-3.5 py-1.5 rounded-lg text-xs font-bold transition shadow-sm"
             >
-              <span className="text-sm">{currentBadge.icon}</span>
-              <div className="text-left hidden lg:block">
-                <p className="font-semibold text-slate-200 leading-tight">{user?.nome || 'Usuário'}</p>
-                <p className="text-[10px] text-slate-400 leading-none">{currentBadge.label}</p>
-              </div>
-              <ChevronDown className="h-3.5 w-3.5 text-slate-400 ml-1" />
+              <LogIn className="h-3.5 w-3.5" />
+              <span>Entrar</span>
             </button>
-
-            {dropdownOpen && (
-              <div 
-                className="absolute right-0 mt-2 w-64 bg-white text-slate-900 rounded-xl shadow-xl border border-slate-200 py-2 z-50 animate-in fade-in slide-in-from-top-1"
-                onClick={() => setDropdownOpen(false)}
+          ) : (
+            <div className="relative">
+              <button
+                onClick={() => setDropdownOpen(!dropdownOpen)}
+                className="flex items-center space-x-2 bg-slate-800 hover:bg-slate-700/80 border border-slate-700 px-3 py-1.5 rounded-lg text-xs font-medium transition"
               >
-                <div className="px-4 py-2 border-b border-slate-100">
-                  <p className="text-[11px] font-bold uppercase tracking-wider text-slate-400">Simulador de Perfis (RBAC v5.0)</p>
-                  <p className="text-xs text-slate-600 mt-0.5">Alterne entre papéis para testar os fluxos regulamentares:</p>
+                <span className="text-sm">{currentBadge.icon}</span>
+                <div className="text-left hidden lg:block">
+                  <p className="font-semibold text-slate-200 leading-tight">{user.nome}</p>
+                  <p className="text-[10px] text-slate-400 leading-none">{currentBadge.label}</p>
                 </div>
+                <ChevronDown className="h-3.5 w-3.5 text-slate-400 ml-1" />
+              </button>
 
-                <div className="py-1">
-                  <button
-                    onClick={() => switchProfile('ESTUDANTE')}
-                    className="w-full text-left px-4 py-2.5 text-xs hover:bg-slate-50 flex items-center justify-between transition"
-                  >
-                    <div className="flex items-center space-x-2.5">
-                      <span className="text-base">🎓</span>
-                      <div>
-                        <p className="font-bold text-slate-800">João Silva</p>
-                        <p className="text-[11px] text-slate-500">Estudante (Inscrição & Recurso)</p>
-                      </div>
-                    </div>
-                    {role === 'ESTUDANTE' && <Check className="h-4 w-4 text-blue-600" />}
-                  </button>
+              {dropdownOpen && (
+                <div 
+                  className="absolute right-0 mt-2 w-72 bg-white text-slate-900 rounded-xl shadow-2xl border border-slate-200 py-2 z-50 animate-in fade-in slide-in-from-top-1"
+                  onClick={() => setDropdownOpen(false)}
+                >
+                  <div className="px-4 py-2 border-b border-slate-100">
+                    <p className="text-[11px] font-bold uppercase tracking-wider text-slate-400">Simulador de Perfis (RBAC v5.0)</p>
+                    <p className="text-xs text-slate-600 mt-0.5">Alterne com 1 clique para testar as regras:</p>
+                  </div>
 
-                  <button
-                    onClick={() => switchProfile('AVALIADOR')}
-                    className="w-full text-left px-4 py-2.5 text-xs hover:bg-slate-50 flex items-center justify-between transition"
-                  >
-                    <div className="flex items-center space-x-2.5">
-                      <span className="text-base">⚖️</span>
-                      <div>
-                        <p className="font-bold text-slate-800">Prof. Carlos</p>
-                        <p className="text-[11px] text-slate-500">Avaliador (Banca & Pareceres)</p>
+                  <div className="py-1">
+                    <button
+                      onClick={() => switchProfile('ESTUDANTE')}
+                      className="w-full text-left px-4 py-2.5 text-xs hover:bg-slate-50 flex items-center justify-between transition"
+                    >
+                      <div className="flex items-center space-x-2.5">
+                        <span className="text-base">🎓</span>
+                        <div>
+                          <p className="font-bold text-slate-800">João Silva</p>
+                          <p className="text-[11px] text-slate-500">Estudante (Inscrição & Recurso)</p>
+                        </div>
                       </div>
-                    </div>
-                    {role === 'AVALIADOR' && <Check className="h-4 w-4 text-purple-600" />}
-                  </button>
+                      {role === 'ESTUDANTE' && <Check className="h-4 w-4 text-blue-600" />}
+                    </button>
 
-                  <button
-                    onClick={() => switchProfile('PRO_REITOR')}
-                    className="w-full text-left px-4 py-2.5 text-xs hover:bg-slate-50 flex items-center justify-between transition"
-                  >
-                    <div className="flex items-center space-x-2.5">
-                      <span className="text-base">🏛️</span>
-                      <div>
-                        <p className="font-bold text-slate-800">Dra. Maria</p>
-                        <p className="text-[11px] text-slate-500">Pró-Reitora (Gestão & Homologação)</p>
+                    <button
+                      onClick={() => switchProfile('AVALIADOR')}
+                      className="w-full text-left px-4 py-2.5 text-xs hover:bg-slate-50 flex items-center justify-between transition"
+                    >
+                      <div className="flex items-center space-x-2.5">
+                        <span className="text-base">⚖️</span>
+                        <div>
+                          <p className="font-bold text-slate-800">Prof. Carlos</p>
+                          <p className="text-[11px] text-slate-500">Avaliador (Banca & Pareceres)</p>
+                        </div>
                       </div>
-                    </div>
-                    {role === 'PRO_REITOR' && <Check className="h-4 w-4 text-emerald-600" />}
-                  </button>
+                      {role === 'AVALIADOR' && <Check className="h-4 w-4 text-purple-600" />}
+                    </button>
+
+                    <button
+                      onClick={() => switchProfile('PRO_REITOR')}
+                      className="w-full text-left px-4 py-2.5 text-xs hover:bg-slate-50 flex items-center justify-between transition"
+                    >
+                      <div className="flex items-center space-x-2.5">
+                        <span className="text-base">🏛️</span>
+                        <div>
+                          <p className="font-bold text-slate-800">Dra. Maria</p>
+                          <p className="text-[11px] text-slate-500">Pró-Reitora (Gestão & Homologação)</p>
+                        </div>
+                      </div>
+                      {role === 'PRO_REITOR' && <Check className="h-4 w-4 text-emerald-600" />}
+                    </button>
+                  </div>
+
+                  <div className="border-t border-slate-100 pt-1 mt-1">
+                    <button
+                      onClick={() => onNavigate('login')}
+                      className="w-full text-left px-4 py-2 text-xs text-blue-600 hover:bg-blue-50 font-semibold flex items-center space-x-2 transition"
+                    >
+                      <KeyRound className="h-3.5 w-3.5" />
+                      <span>Ver Tela Completa de Login</span>
+                    </button>
+                    <button
+                      onClick={logout}
+                      className="w-full text-left px-4 py-2 text-xs text-red-600 hover:bg-red-50 font-semibold flex items-center space-x-2 transition"
+                    >
+                      <LogOut className="h-3.5 w-3.5" />
+                      <span>Sair da Sessão</span>
+                    </button>
+                  </div>
                 </div>
-              </div>
-            )}
-          </div>
+              )}
+            </div>
+          )}
         </div>
       </div>
     </header>

@@ -9,10 +9,11 @@ import { EvaluationQueuePage } from './pages/EvaluationQueuePage';
 import { PreliminaryResultsPage } from './pages/PreliminaryResultsPage';
 import { ExecutiveApprovalPage } from './pages/ExecutiveApprovalPage';
 import { AuditLogsPage } from './pages/AuditLogsPage';
+import { LoginPage } from './pages/LoginPage';
 import { CreateEditalModal } from './components/CreateEditalModal';
 
 export const MainLayout: React.FC = () => {
-  const [currentPage, setCurrentPage] = useState<'catalog' | 'detail' | 'my-applications' | 'review' | 'evaluation' | 'results' | 'approval' | 'audit'>('catalog');
+  const [currentPage, setCurrentPage] = useState<'catalog' | 'detail' | 'my-applications' | 'review' | 'evaluation' | 'results' | 'approval' | 'audit' | 'login'>('catalog');
   const [selectedEditalId, setSelectedEditalId] = useState<number | null>(null);
   const [isCreateModalOpen, setIsCreateModalOpen] = useState(false);
   const [refreshKey, setRefreshKey] = useState(0);
@@ -71,6 +72,12 @@ export const MainLayout: React.FC = () => {
         )}
         {currentPage === 'audit' && (
           <AuditLogsPage />
+        )}
+        {currentPage === 'login' && (
+          <LoginPage 
+            onLoginSuccess={() => setCurrentPage('catalog')} 
+            onNavigate={handleNavigate} 
+          />
         )}
       </main>
 

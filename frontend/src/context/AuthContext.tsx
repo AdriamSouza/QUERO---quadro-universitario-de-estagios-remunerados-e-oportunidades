@@ -16,6 +16,7 @@ interface AuthContextType {
   role: UserRole;
   loading: boolean;
   switchProfile: (newRole: UserRole) => Promise<void>;
+  loginWithCustomEmail: (email: string, targetRole: UserRole) => Promise<void>;
   logout: () => void;
 }
 
@@ -50,13 +51,20 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       localStorage.setItem('active_role', targetRole);
       localStorage.setItem('user_info', JSON.stringify(loggedUser));
     } catch (err) {
-      console.error('Falha ao autenticar usuário simulado:', err);
+      console.error('Falha ao autenticar usuário:', err);
+      throw err;
     }
   };
 
   const switchProfile = async (newRole: UserRole) => {
     setLoading(true);
     await loginWithEmail(MOCK_PROFILES[newRole].email, newRole);
+    setLoading(false);
+  };
+
+  const loginWithCustomEmail = async (email: string, targetRole: UserRole) => {
+    setLoading(true);
+    await loginWithEmail(email, targetRole);
     setLoading(false);
   };
 
@@ -85,15 +93,20 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       }
 
       // Login inicial automático para permitir navegação imediata
-      await loginWithEmail(MOCK_PROFILES[savedRole].email, savedRole);
-      setLoading(false);
+      try {
+        await loginWithEmail(MOCK_PROFILES[savedRole].email, savedRole);
+      } catch {
+        // ignora se offline
+      } finally {
+        setLoading(false);
+      }
     };
 
     initAuth();
   }, []);
 
   return (
-    <AuthContext.Provider value={{ user, role, loading, switchProfile, logout }}>
+    <AuthContext.Provider value={{ user, role, loading, switchProfile, loginWithCustomEmail, logout }}>
       {children}
     </AuthContext.Provider>
   );
