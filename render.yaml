@@ -36,8 +36,6 @@ services:
   - type: web
     name: quero-frontend
     env: static
-    region: ohio
-    plan: free
     buildCommand: cd frontend && npm install && npm run build
     staticPublishPath: ./frontend/dist
     routes:
