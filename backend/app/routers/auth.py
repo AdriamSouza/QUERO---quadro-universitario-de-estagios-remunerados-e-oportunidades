@@ -1,6 +1,10 @@
 from fastapi import APIRouter, HTTPException, status, Depends, Response
+from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy import select
 from app.schemas.auth import LoginRequest, TokenResponse, UserResponse
 from app.core.security import create_access_token, MockAuthProvider, get_current_user
+from app.core.database import get_db
+from app.models.user import Usuario
 from app.core.config import settings
 
 router = APIRouter(prefix="/auth", tags=["Autenticação"])
@@ -20,31 +24,66 @@ async def sso_login():
 
 
 @router.get("/sso/callback", response_model=TokenResponse)
-async def sso_callback(code: str = "mock_sso_authorization_code"):
+async def sso_callback(
+    code: str = "mock_sso_authorization_code",
+    db: AsyncSession = Depends(get_db)
+):
     """
     Conclui autenticação SSO, provisiona usuário como ESTUDANTE caso novo e gera token JWT (TRV-02).
     """
     user = MockAuthProvider.authenticate("estudante@faculdade.edu.br")
+    if not user:
+        user = {
+            "id": 1,
+            "nome": "João Silva",
+            "email": "estudante@faculdade.edu.br",
+            "cpf": "11122233344",
+            "matricula": "2024001001",
+            "perfil": "ESTUDANTE",
+            "perfis": ["ESTUDANTE"],
+        }
+    
+    # Garantir existência no banco de dados
+    stmt = select(Usuario).where(Usuario.email == user["email"])
+    res = await db.execute(stmt)
+    user_db = res.scalar_one_or_none()
+    if not user_db:
+        user_db = Usuario(
+            id=user["id"],
+            cpf=user["cpf"],
+            matricula=user.get("matricula"),
+            nome=user["nome"],
+            email=user["email"],
+            perfil=user.get("perfil", "ESTUDANTE"),
+            ativo=True
+        )
+        db.add(user_db)
+        await db.commit()
+        await db.refresh(user_db)
+
     token_data = {
-        "sub": str(user["id"]),
-        "email": user["email"],
-        "nome": user["nome"],
-        "perfil": user["perfil"],
-        "perfis": user["perfis"],
+        "sub": str(user_db.id),
+        "email": user_db.email,
+        "nome": user_db.nome,
+        "perfil": user_db.perfil,
+        "perfis": user.get("perfis", [user_db.perfil]),
     }
     token = create_access_token(data=token_data)
     return TokenResponse(
         access_token=token,
         token_type="bearer",
-        user_id=user["id"],
-        nome=user["nome"],
-        email=user["email"],
-        perfis=user["perfis"],
+        user_id=user_db.id,
+        nome=user_db.nome,
+        email=user_db.email,
+        perfis=user.get("perfis", [user_db.perfil]),
     )
 
 
 @router.post("/login", response_model=TokenResponse)
-async def login(credentials: LoginRequest):
+async def login(
+    credentials: LoginRequest,
+    db: AsyncSession = Depends(get_db)
+):
     """
     Autenticação de desenvolvimento e contingência local (v5.0 §5 RNF-06).
     """
@@ -52,28 +91,51 @@ async def login(credentials: LoginRequest):
         user = MockAuthProvider.authenticate(credentials.email)
         if not user:
             # Fallback provisionando como ESTUDANTE
+            clean_email = credentials.email.lower().strip()
+            nome_calc = clean_email.split("@")[0].replace(".", " ").title()
             user = {
                 "id": 99,
-                "nome": credentials.email.split("@")[0].replace(".", " ").title(),
-                "email": credentials.email,
+                "nome": nome_calc,
+                "email": clean_email,
+                "cpf": "99988877766",
+                "matricula": "2024999999",
                 "perfil": "ESTUDANTE",
                 "perfis": ["ESTUDANTE"],
             }
+
+        # Garantir persistência do usuário na tabela usuarios para integridade referencial
+        stmt = select(Usuario).where(Usuario.email == user["email"])
+        res = await db.execute(stmt)
+        user_db = res.scalar_one_or_none()
+        if not user_db:
+            user_db = Usuario(
+                id=user["id"],
+                cpf=user.get("cpf", "00000000000"),
+                matricula=user.get("matricula"),
+                nome=user["nome"],
+                email=user["email"],
+                perfil=user.get("perfil", "ESTUDANTE"),
+                ativo=True
+            )
+            db.add(user_db)
+            await db.commit()
+            await db.refresh(user_db)
+
         token_data = {
-            "sub": str(user["id"]),
-            "email": user["email"],
-            "nome": user["nome"],
-            "perfil": user.get("perfil", "ESTUDANTE"),
-            "perfis": user.get("perfis", ["ESTUDANTE"]),
+            "sub": str(user_db.id),
+            "email": user_db.email,
+            "nome": user_db.nome,
+            "perfil": user_db.perfil,
+            "perfis": user.get("perfis", [user_db.perfil]),
         }
         token = create_access_token(data=token_data)
         return TokenResponse(
             access_token=token,
             token_type="bearer",
-            user_id=user["id"],
-            nome=user["nome"],
-            email=user["email"],
-            perfis=user.get("perfis", ["ESTUDANTE"]),
+            user_id=user_db.id,
+            nome=user_db.nome,
+            email=user_db.email,
+            perfis=user.get("perfis", [user_db.perfil]),
         )
 
     raise HTTPException(

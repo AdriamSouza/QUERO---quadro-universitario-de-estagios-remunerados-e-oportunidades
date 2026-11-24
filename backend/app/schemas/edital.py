@@ -1,5 +1,5 @@
 from pydantic import BaseModel, Field, field_validator
-from typing import List, Optional, Dict, Any
+from typing import List, Optional, Dict, Any, Union
 from datetime import datetime
 from decimal import Decimal
 
@@ -74,7 +74,7 @@ class EditalCreate(BaseModel):
     vagas: int = Field(..., gt=0, examples=[5])
     cr_minimo: Decimal = Field(..., ge=0, le=10, examples=[6.00])
     prazo_recurso_horas: int = Field(48, gt=0, examples=[48])
-    criterios_pontuacao: Dict[str, Any] = Field(default_factory=dict)
+    criterios_pontuacao: Union[Dict[str, Any], List[Any]] = Field(default_factory=dict)
     criterios_desempate: List[str] = Field(default=["CR_DESC", "SUBMISSAO_ASC"])
 
     data_inicio_inscricao: datetime
@@ -136,7 +136,7 @@ class EditalUpdate(BaseModel):
     vagas: Optional[int] = None
     cr_minimo: Optional[Decimal] = None
     prazo_recurso_horas: Optional[int] = None
-    criterios_pontuacao: Optional[Dict[str, Any]] = None
+    criterios_pontuacao: Optional[Union[Dict[str, Any], List[Any]]] = None
     criterios_desempate: Optional[List[str]] = None
     data_inicio_inscricao: Optional[datetime] = None
     data_fim_inscricao: Optional[datetime] = None
@@ -160,7 +160,7 @@ class EditalResponse(BaseModel):
     vagas: int
     cr_minimo: Decimal
     prazo_recurso_horas: int
-    criterios_pontuacao: Dict[str, Any] = {}
+    criterios_pontuacao: Union[Dict[str, Any], List[Any]] = {}
     criterios_desempate: List[str] = []
     status: str
     data_inicio_inscricao: datetime
