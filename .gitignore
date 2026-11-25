@@ -30,6 +30,11 @@ data/
 documentos/
 /backend/data/
 /data/
+*.pdf
+*.docx
+*.doc
+*.xlsx
+*.pptx
 
 # Docker & Logs
 *.log
