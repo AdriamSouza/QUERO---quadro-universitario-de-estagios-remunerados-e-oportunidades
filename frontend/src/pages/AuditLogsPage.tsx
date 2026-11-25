@@ -1,13 +1,17 @@
 import React, { useState, useEffect } from 'react';
 import { ShieldCheck, Eye, RefreshCw } from 'lucide-react';
 import { fetchAuditLogs, AuditLog } from '../api/homologacao';
+import { getErrorMessage } from '../api/client';
+import { Modal, btn } from '../components/ui';
+import { useToast } from '../components/Toast';
 
 export const AuditLogsPage: React.FC = () => {
+  const toast = useToast();
   const [logs, setLogs] = useState<AuditLog[]>([]);
   const [total, setTotal] = useState(0);
   const [loading, setLoading] = useState(false);
   const [entidade, setEntidade] = useState('');
-  const [selectedPayload, setSelectedPayload] = useState<any>(null);
+  const [selectedPayload, setSelectedPayload] = useState<{ antes: unknown; depois: unknown } | null>(null);
 
   const loadLogs = async () => {
     setLoading(true);
@@ -16,7 +20,7 @@ export const AuditLogsPage: React.FC = () => {
       setLogs(res.items);
       setTotal(res.total);
     } catch (err) {
-      console.error(err);
+      toast.error(getErrorMessage(err, 'Não foi possível carregar os registros de auditoria.'));
     } finally {
       setLoading(false);
     }
@@ -24,6 +28,7 @@ export const AuditLogsPage: React.FC = () => {
 
   useEffect(() => {
     loadLogs();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [entidade]);
 
   return (
@@ -130,36 +135,28 @@ export const AuditLogsPage: React.FC = () => {
 
       {/* Modal Visualização de Payload / Diff */}
       {selectedPayload && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/60 backdrop-blur-sm p-4">
-          <div className="bg-white rounded-2xl shadow-xl max-w-2xl w-full border border-slate-200 p-6">
-            <h3 className="text-base font-bold text-slate-900 mb-3">Detalhes do evento</h3>
-
-            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 mb-4 text-xs font-mono">
-              <div className="bg-slate-50 p-3 rounded-lg border border-slate-200">
-                <span className="font-sans font-bold text-slate-700 block mb-1">Antes:</span>
-                <pre className="text-[11px] whitespace-pre-wrap text-slate-600 max-h-60 overflow-y-auto">
-                  {selectedPayload.antes ? JSON.stringify(selectedPayload.antes, null, 2) : '—'}
-                </pre>
-              </div>
-
-              <div className="bg-slate-50 p-3 rounded-lg border border-slate-200">
-                <span className="font-sans font-bold text-slate-700 block mb-1">Depois:</span>
-                <pre className="text-[11px] whitespace-pre-wrap text-slate-600 max-h-60 overflow-y-auto">
-                  {selectedPayload.depois ? JSON.stringify(selectedPayload.depois, null, 2) : '—'}
-                </pre>
-              </div>
+        <Modal
+          title="Detalhes do evento"
+          size="lg"
+          onClose={() => setSelectedPayload(null)}
+          footer={<button onClick={() => setSelectedPayload(null)} className={btn.secondary}>Fechar</button>}
+        >
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 text-xs font-mono">
+            <div className="bg-slate-50 p-3 rounded-lg border border-slate-200">
+              <span className="font-sans font-bold text-slate-700 block mb-1">Antes:</span>
+              <pre className="text-[11px] whitespace-pre-wrap text-slate-600 max-h-60 overflow-y-auto">
+                {selectedPayload.antes ? JSON.stringify(selectedPayload.antes, null, 2) : '—'}
+              </pre>
             </div>
 
-            <div className="flex justify-end">
-              <button
-                onClick={() => setSelectedPayload(null)}
-                className="px-4 py-2 bg-slate-100 text-slate-700 rounded-lg text-xs font-medium hover:bg-slate-200"
-              >
-                Fechar
-              </button>
+            <div className="bg-slate-50 p-3 rounded-lg border border-slate-200">
+              <span className="font-sans font-bold text-slate-700 block mb-1">Depois:</span>
+              <pre className="text-[11px] whitespace-pre-wrap text-slate-600 max-h-60 overflow-y-auto">
+                {selectedPayload.depois ? JSON.stringify(selectedPayload.depois, null, 2) : '—'}
+              </pre>
             </div>
           </div>
-        </div>
+        </Modal>
       )}
     </div>
   );

@@ -1,8 +1,18 @@
 import React, { useEffect, useState } from 'react';
+import {
+  BrowserRouter,
+  Navigate,
+  Route,
+  Routes,
+  useLocation,
+  useNavigate,
+  useParams,
+} from 'react-router-dom';
 import { AuthProvider, useAuth, UserRole } from './context/AuthContext';
 import { ToastProvider, useToast } from './components/Toast';
 import { Navbar } from './components/Navbar';
 import { CreateEditalModal } from './components/CreateEditalModal';
+import { ErrorBoundary } from './components/ErrorBoundary';
 import { Spinner } from './components/ui';
 import { CatalogPage } from './pages/CatalogPage';
 import { EditalDetailPage } from './pages/EditalDetailPage';
@@ -19,115 +29,184 @@ export type Page =
   | 'catalog' | 'detail' | 'login' | 'my-applications' | 'review' | 'evaluation'
   | 'results' | 'approval' | 'audit' | 'users';
 
-/** Perfis exigidos por página. Páginas ausentes são públicas. */
-const PAGE_ROLES: Partial<Record<Page, UserRole[]>> = {
-  'my-applications': ['ESTUDANTE'],
-  review: ['PRO_REITOR'],
-  evaluation: ['AVALIADOR', 'PRO_REITOR'],
-  approval: ['PRO_REITOR'],
-  audit: ['PRO_REITOR'],
-  users: ['PRO_REITOR'],
+const PAGE_PATHS: Record<Exclude<Page, 'detail'>, string> = {
+  catalog: '/',
+  login: '/entrar',
+  'my-applications': '/minhas-inscricoes',
+  review: '/analise-documental',
+  evaluation: '/avaliacoes',
+  results: '/resultados',
+  approval: '/homologacao',
+  audit: '/auditoria',
+  users: '/usuarios',
+};
+
+function getPageFromPathname(pathname: string): Page {
+  if (pathname.startsWith('/editais/')) return 'detail';
+  const entry = Object.entries(PAGE_PATHS).find(([, path]) => path === pathname);
+  return (entry?.[0] as Page) || 'catalog';
+}
+
+const ProtectedRoute: React.FC<{
+  roles?: UserRole[];
+  children: React.ReactElement;
+}> = ({ roles, children }) => {
+  const { user, role, loading } = useAuth();
+  const location = useLocation();
+  const routerNavigate = useNavigate();
+
+  if (loading) return <Spinner label="Carregando..." />;
+  if (roles && !user) {
+    return <Navigate to={PAGE_PATHS.login} state={{ from: location.pathname }} replace />;
+  }
+  if (roles && user && role && !roles.includes(role)) {
+    return (
+      <div className="max-w-xl mx-auto py-20 text-center px-4">
+        <h2 className="text-xl font-bold text-slate-900">Acesso restrito</h2>
+        <p className="text-sm text-slate-600 mt-2">Seu perfil não tem acesso a esta área.</p>
+        <button onClick={() => routerNavigate(PAGE_PATHS.catalog)} className="mt-6 text-blue-600 font-semibold text-sm">
+          Voltar para os editais
+        </button>
+      </div>
+    );
+  }
+  return children;
+};
+
+const EditalDetailRoute: React.FC<{ onNavigate: (page: Page) => void }> = ({ onNavigate }) => {
+  const { id } = useParams<{ id: string }>();
+  const editalId = Number(id);
+  if (!id || !Number.isInteger(editalId) || editalId <= 0) {
+    return <Navigate to={PAGE_PATHS.catalog} replace />;
+  }
+  return <EditalDetailPage editalId={editalId} onBack={() => onNavigate('catalog')} onNavigate={onNavigate} />;
+};
+
+const LoginRoute: React.FC = () => {
+  const { loading } = useAuth();
+  const location = useLocation();
+  const routerNavigate = useNavigate();
+
+  if (loading) return <Spinner label="Carregando..." />;
+  const from = (location.state as { from?: string } | null)?.from || PAGE_PATHS.catalog;
+
+  return (
+    <LoginPage
+      onLoginSuccess={() => {
+        routerNavigate(from, { replace: true });
+      }}
+    />
+  );
 };
 
 export const MainLayout: React.FC = () => {
-  const { user, role, loading, sessionExpired } = useAuth();
+  const { sessionExpired } = useAuth();
   const toast = useToast();
-  const [currentPage, setCurrentPage] = useState<Page>('catalog');
-  const [pendingPage, setPendingPage] = useState<Page | null>(null);
-  const [selectedEditalId, setSelectedEditalId] = useState<number | null>(null);
+  const location = useLocation();
+  const routerNavigate = useNavigate();
   const [isCreateModalOpen, setIsCreateModalOpen] = useState(false);
   const [refreshKey, setRefreshKey] = useState(0);
+
+  const currentPage = getPageFromPathname(location.pathname);
 
   useEffect(() => {
     if (sessionExpired) {
       toast.info('Sua sessão expirou. Entre novamente para continuar.');
-      setCurrentPage('login');
+      routerNavigate(PAGE_PATHS.login, { state: { from: location.pathname }, replace: true });
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [sessionExpired]);
 
-  const navigate = (page: Page) => {
-    const required = PAGE_ROLES[page];
-    if (required && !user) {
-      setPendingPage(page);
-      setCurrentPage('login');
-    } else {
-      setCurrentPage(page);
-    }
+  useEffect(() => {
     window.scrollTo({ top: 0 });
+  }, [location.pathname]);
+
+  const navigateToPage = (page: Page) => {
+    if (page === 'detail') {
+      routerNavigate(PAGE_PATHS.catalog);
+      return;
+    }
+    routerNavigate(PAGE_PATHS[page]);
   };
 
   const handleSelectEdital = (id: number) => {
-    setSelectedEditalId(id);
-    setCurrentPage('detail');
-    window.scrollTo({ top: 0 });
-  };
-
-  const required = PAGE_ROLES[currentPage];
-  const forbidden = !!(required && user && role && !required.includes(role));
-  const needsLogin = !!(required && !user);
-
-  const renderPage = () => {
-    if (loading) return <Spinner label="Carregando..." />;
-    if (needsLogin || currentPage === 'login') {
-      return (
-        <LoginPage
-          onLoginSuccess={() => {
-            const target = pendingPage;
-            setPendingPage(null);
-            setCurrentPage(target || 'catalog');
-          }}
-        />
-      );
-    }
-    if (forbidden) {
-      return (
-        <div className="max-w-xl mx-auto py-20 text-center px-4">
-          <h2 className="text-xl font-bold text-slate-900">Acesso restrito</h2>
-          <p className="text-sm text-slate-600 mt-2">Seu perfil não tem acesso a esta área.</p>
-          <button onClick={() => navigate('catalog')} className="mt-6 text-blue-600 font-semibold text-sm">Voltar para os editais</button>
-        </div>
-      );
-    }
-    switch (currentPage) {
-      case 'detail':
-        return selectedEditalId ? (
-          <EditalDetailPage editalId={selectedEditalId} onBack={() => navigate('catalog')} onNavigate={navigate} />
-        ) : null;
-      case 'my-applications':
-        return <MyApplicationsPage onSelectEdital={handleSelectEdital} />;
-      case 'review':
-        return <DocumentReviewPage />;
-      case 'evaluation':
-        return <EvaluationQueuePage />;
-      case 'results':
-        return <PreliminaryResultsPage />;
-      case 'approval':
-        return <ExecutiveApprovalPage />;
-      case 'audit':
-        return <AuditLogsPage />;
-      case 'users':
-        return <UsersPage />;
-      default:
-        return (
-          <CatalogPage
-            key={refreshKey}
-            onSelectEdital={handleSelectEdital}
-            onOpenCreateEdital={() => setIsCreateModalOpen(true)}
-          />
-        );
-    }
+    routerNavigate(`/editais/${id}`);
   };
 
   return (
     <div className="min-h-screen bg-slate-50 flex flex-col font-sans">
       <Navbar
-        onNavigate={(p) => navigate(p as Page)}
+        onNavigate={(p) => navigateToPage(p as Page)}
         currentPage={currentPage}
         onOpenCreateEdital={() => setIsCreateModalOpen(true)}
       />
 
-      <main className="flex-1">{renderPage()}</main>
+      <main className="flex-1">
+        <Routes>
+          <Route
+            path={PAGE_PATHS.catalog}
+            element={
+              <CatalogPage
+                key={refreshKey}
+                onSelectEdital={handleSelectEdital}
+                onOpenCreateEdital={() => setIsCreateModalOpen(true)}
+              />
+            }
+          />
+          <Route path="/editais/:id" element={<EditalDetailRoute onNavigate={navigateToPage} />} />
+          <Route path={PAGE_PATHS.login} element={<LoginRoute />} />
+          <Route
+            path={PAGE_PATHS['my-applications']}
+            element={
+              <ProtectedRoute roles={['ESTUDANTE']}>
+                <MyApplicationsPage onSelectEdital={handleSelectEdital} />
+              </ProtectedRoute>
+            }
+          />
+          <Route
+            path={PAGE_PATHS.review}
+            element={
+              <ProtectedRoute roles={['PRO_REITOR']}>
+                <DocumentReviewPage />
+              </ProtectedRoute>
+            }
+          />
+          <Route
+            path={PAGE_PATHS.evaluation}
+            element={
+              <ProtectedRoute roles={['AVALIADOR', 'PRO_REITOR']}>
+                <EvaluationQueuePage />
+              </ProtectedRoute>
+            }
+          />
+          <Route path={PAGE_PATHS.results} element={<PreliminaryResultsPage />} />
+          <Route
+            path={PAGE_PATHS.approval}
+            element={
+              <ProtectedRoute roles={['PRO_REITOR']}>
+                <ExecutiveApprovalPage />
+              </ProtectedRoute>
+            }
+          />
+          <Route
+            path={PAGE_PATHS.audit}
+            element={
+              <ProtectedRoute roles={['PRO_REITOR']}>
+                <AuditLogsPage />
+              </ProtectedRoute>
+            }
+          />
+          <Route
+            path={PAGE_PATHS.users}
+            element={
+              <ProtectedRoute roles={['PRO_REITOR']}>
+                <UsersPage />
+              </ProtectedRoute>
+            }
+          />
+          <Route path="*" element={<Navigate to={PAGE_PATHS.catalog} replace />} />
+        </Routes>
+      </main>
 
       <CreateEditalModal
         isOpen={isCreateModalOpen}
@@ -147,11 +226,15 @@ export const MainLayout: React.FC = () => {
 };
 
 export const App: React.FC = () => (
-  <ToastProvider>
-    <AuthProvider>
-      <MainLayout />
-    </AuthProvider>
-  </ToastProvider>
+  <ErrorBoundary>
+    <BrowserRouter>
+      <ToastProvider>
+        <AuthProvider>
+          <MainLayout />
+        </AuthProvider>
+      </ToastProvider>
+    </BrowserRouter>
+  </ErrorBoundary>
 );
 
 export default App;

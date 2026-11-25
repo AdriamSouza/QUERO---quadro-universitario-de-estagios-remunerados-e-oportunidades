@@ -4,6 +4,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
 from app.core.database import get_db
+from app.core.rate_limit import rate_limit
 from app.core.security import (
     create_access_token, get_client_ip, get_current_user, get_password_hash, verify_password,
 )
@@ -28,7 +29,7 @@ def _token_response(user: Usuario) -> TokenResponse:
     )
 
 
-@router.post("/login", response_model=TokenResponse)
+@router.post("/login", response_model=TokenResponse, dependencies=[Depends(rate_limit("auth:login", 10, 60))])
 async def login(credentials: LoginRequest, request: Request, db: AsyncSession = Depends(get_db)):
     """Autenticação por e-mail e senha."""
     email = credentials.email.lower().strip()
@@ -46,7 +47,12 @@ async def login(credentials: LoginRequest, request: Request, db: AsyncSession = 
     return _token_response(user)
 
 
-@router.post("/cadastro", response_model=TokenResponse, status_code=status.HTTP_201_CREATED)
+@router.post(
+    "/cadastro",
+    response_model=TokenResponse,
+    status_code=status.HTTP_201_CREATED,
+    dependencies=[Depends(rate_limit("auth:cadastro", 5, 60))],
+)
 async def cadastrar_estudante(data: CadastroEstudanteRequest, request: Request, db: AsyncSession = Depends(get_db)):
     """Cadastro de estudante (perfil ESTUDANTE)."""
     if not settings.ALLOW_STUDENT_SIGNUP:

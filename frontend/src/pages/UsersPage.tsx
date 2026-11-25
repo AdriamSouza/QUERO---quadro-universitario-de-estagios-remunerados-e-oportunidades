@@ -19,6 +19,9 @@ export const UsersPage: React.FC = () => {
   const [criando, setCriando] = useState(false);
   const [form, setForm] = useState<UsuarioCreatePayload>(VAZIO);
   const [saving, setSaving] = useState(false);
+  const [resetTarget, setResetTarget] = useState<Usuario | null>(null);
+  const [novaSenha, setNovaSenha] = useState('');
+  const [resetSaving, setResetSaving] = useState(false);
 
   const load = async () => {
     setLoading(true);
@@ -62,14 +65,28 @@ export const UsersPage: React.FC = () => {
     }
   };
 
-  const redefinirSenha = async (u: Usuario) => {
-    const nova = window.prompt(`Nova senha para ${u.nome} (mínimo de 8 caracteres):`);
-    if (!nova) return;
+  const abrirRedefinirSenha = (u: Usuario) => {
+    setResetTarget(u);
+    setNovaSenha('');
+  };
+
+  const confirmarRedefinirSenha = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!resetTarget) return;
+    if (novaSenha.length < 8) {
+      toast.error('A nova senha deve ter pelo menos 8 caracteres.');
+      return;
+    }
+    setResetSaving(true);
     try {
-      await updateUsuario(u.id, { nova_senha: nova });
+      await updateUsuario(resetTarget.id, { nova_senha: novaSenha });
       toast.success('Senha redefinida.');
+      setResetTarget(null);
+      setNovaSenha('');
     } catch (err) {
       toast.error(getErrorMessage(err));
+    } finally {
+      setResetSaving(false);
     }
   };
 
@@ -119,7 +136,7 @@ export const UsersPage: React.FC = () => {
                   <td className="py-2.5 px-4 text-slate-500">{formatDate(u.criado_em)}</td>
                   <td className="py-2.5 px-4">{u.ativo ? <span className="text-emerald-700">Ativa</span> : <span className="text-slate-500">Desativada</span>}</td>
                   <td className="py-2.5 px-4 text-right whitespace-nowrap">
-                    <button onClick={() => redefinirSenha(u)} className="text-blue-600 hover:text-blue-800 text-xs font-semibold mr-3">Redefinir senha</button>
+                    <button onClick={() => abrirRedefinirSenha(u)} className="text-blue-600 hover:text-blue-800 text-xs font-semibold mr-3">Redefinir senha</button>
                     {u.id !== user?.id && (
                       <button onClick={() => alternarAtivo(u)} className="text-xs font-semibold text-slate-600 hover:text-slate-900">
                         {u.ativo ? 'Desativar' : 'Reativar'}
@@ -159,6 +176,38 @@ export const UsersPage: React.FC = () => {
             <input type="text" placeholder="Senha inicial (mínimo de 8 caracteres)" value={form.senha} onChange={(e) => setForm({ ...form, senha: e.target.value })} className={inputClass} autoComplete="off" />
             <p className="text-xs text-slate-500">Oriente o usuário a alterar a senha no primeiro acesso (menu do usuário › Alterar senha).</p>
           </div>
+        </Modal>
+      )}
+
+      {resetTarget && (
+        <Modal
+          title="Redefinir senha"
+          subtitle={`Conta: ${resetTarget.nome} (${resetTarget.email})`}
+          onClose={() => !resetSaving && setResetTarget(null)}
+          footer={
+            <>
+              <button type="button" onClick={() => setResetTarget(null)} disabled={resetSaving} className={btn.secondary}>Cancelar</button>
+              <button type="submit" form="reset-password-form" disabled={resetSaving} className={btn.primary}>
+                {resetSaving && <Loader2 className="h-4 w-4 mr-1.5 animate-spin" />} Salvar nova senha
+              </button>
+            </>
+          }
+        >
+          <form id="reset-password-form" onSubmit={confirmarRedefinirSenha} className="space-y-3">
+            <div>
+              <label className="block text-xs font-semibold text-slate-600 mb-1">Nova senha (mínimo de 8 caracteres)</label>
+              <input
+                type="password"
+                value={novaSenha}
+                onChange={(e) => setNovaSenha(e.target.value)}
+                className={inputClass}
+                minLength={8}
+                required
+                autoComplete="new-password"
+                autoFocus
+              />
+            </div>
+          </form>
         </Modal>
       )}
     </div>
