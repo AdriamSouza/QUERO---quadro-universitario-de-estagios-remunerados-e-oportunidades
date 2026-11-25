@@ -1,18 +1,16 @@
 from typing import AsyncGenerator
 from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker, AsyncSession
-from sqlalchemy.orm import declarative_base
 from app.core.config import settings
 
-# Engine assíncrona SQLAlchemy 2.0 com pool calibrado para 300 usuários
+# Pool parametrizável por ambiente (o plano gratuito do Render aceita poucas conexões simultâneas)
 engine = create_async_engine(
     settings.DATABASE_URL,
-    echo=(settings.ENVIRONMENT == "development"),
-    pool_size=20,
-    max_overflow=40,
-    pool_pre_ping=True
+    echo=settings.SQL_ECHO,
+    pool_size=settings.DB_POOL_SIZE,
+    max_overflow=settings.DB_MAX_OVERFLOW,
+    pool_pre_ping=True,
 )
 
-# Async session maker
 AsyncSessionLocal = async_sessionmaker(
     bind=engine,
     class_=AsyncSession,
@@ -24,7 +22,4 @@ AsyncSessionLocal = async_sessionmaker(
 async def get_db() -> AsyncGenerator[AsyncSession, None]:
     """Dependency injection para obtenção de sessão de banco."""
     async with AsyncSessionLocal() as session:
-        try:
-            yield session
-        finally:
-            await session.close()
+        yield session

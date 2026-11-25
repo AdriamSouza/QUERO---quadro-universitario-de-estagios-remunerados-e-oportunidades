@@ -1,4 +1,4 @@
-from pydantic import BaseModel
+from pydantic import ConfigDict, BaseModel
 from typing import List, Optional, Dict, Any
 from datetime import datetime
 
@@ -14,8 +14,7 @@ class AuditoriaLogResponse(BaseModel):
     ip_origem: Optional[str] = None
     criado_em: datetime
 
-    class Config:
-        from_attributes = True
+    model_config = ConfigDict(from_attributes=True)
 
 
 class AuditoriaLogListResponse(BaseModel):

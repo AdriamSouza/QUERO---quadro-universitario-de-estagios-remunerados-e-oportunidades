@@ -1,5 +1,3 @@
-version: '3.8'
-
 services:
   postgres:
     image: postgres:16-alpine
@@ -10,7 +8,7 @@ services:
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres_dev_secret_change_me}
       POSTGRES_DB: ${POSTGRES_DB:-quero_db}
     ports:
-      - "5432:5432"
+      - "127.0.0.1:5433:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
     healthcheck:
@@ -30,6 +28,11 @@ services:
         condition: service_healthy
     env_file:
       - .env
+    environment:
+      POSTGRES_HOST: postgres
+      STORAGE_PATH: /data/documentos
+    # Em desenvolvimento: aplica as migrações e recarrega o código a cada alteração
+    command: sh -c "alembic upgrade head && uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload"
     volumes:
       - ./backend:/app
       - documentos_storage:/data/documentos
@@ -49,6 +52,8 @@ services:
     restart: unless-stopped
     depends_on:
       - backend
+    environment:
+      VITE_API_BASE_URL: http://localhost:8000
     volumes:
       - ./frontend:/app
       - /app/node_modules
@@ -57,6 +62,4 @@ services:
 
 volumes:
   postgres_data:
-    driver: local
   documentos_storage:
-    driver: local

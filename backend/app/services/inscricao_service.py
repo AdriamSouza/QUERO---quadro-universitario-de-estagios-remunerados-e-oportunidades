@@ -1,23 +1,108 @@
-import os
-import uuid
 import hashlib
-from decimal import Decimal
+import logging
+import uuid
 from datetime import datetime, timezone
-from typing import Optional, List, Dict, Any
-from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, func, and_, or_, text
-from sqlalchemy.orm import selectinload, joinedload
-from fastapi import HTTPException, status, UploadFile
+from decimal import Decimal
+from typing import Dict, List, Optional, Tuple
 
-from app.models.inscricao import Inscricao, Arquivo
-from app.models.edital import Edital, EditalCurso, EditalDocumentoExigido, ComissaoEdital
-from app.models.user import Usuario
+from fastapi import HTTPException, UploadFile, status
+from sqlalchemy import and_, select, text
+from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import joinedload, selectinload
+
+from app.core.storage import get_storage_service, read_upload_limited, validate_pdf_bytes
+from app.models.edital import Edital
+from app.models.inscricao import Arquivo, Inscricao
 from app.models.notificacao import Notificacao
-from app.schemas.inscricao import InscricaoReanalisarRequest, InscricaoDesistirRequest
-from app.core.storage import get_storage_service, MAGIC_PDF_BYTES
-from app.core.config import settings
+from app.schemas.inscricao import InscricaoDesistirRequest, InscricaoReanalisarRequest
 from app.services.academic_service import AcademicIntegrationClient
 from app.services.audit_service import log_audit_action
+from app.services.workflow_service import STATUS_INSCRICAO_LABEL
+
+logger = logging.getLogger(__name__)
+
+FASES_POS_PRELIMINAR = ("RESULTADO_PRELIMINAR", "EM_RECURSO", "EM_HOMOLOGACAO_FINAL", "ENCERRADO")
+
+
+async def _ler_e_validar_arquivos(
+    edital: Edital, arquivos: Dict[int, UploadFile]
+) -> Dict[int, Tuple[UploadFile, bytes]]:
+    """Valida que os documentos pertencem ao edital e que todos os arquivos são PDFs válidos."""
+    ids_validos = {d.id for d in edital.documentos_exigidos}
+    desconhecidos = [doc_id for doc_id in arquivos if doc_id not in ids_validos]
+    if desconhecidos:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="Um ou mais arquivos foram enviados para documentos que não pertencem a este edital.",
+        )
+    lidos: Dict[int, Tuple[UploadFile, bytes]] = {}
+    for doc_id, upload in arquivos.items():
+        content = await read_upload_limited(upload)
+        validate_pdf_bytes(content, upload.filename or "documento.pdf")
+        lidos[doc_id] = (upload, content)
+    return lidos
+
+
+async def _gravar_arquivos(
+    inscricao: Inscricao, edital_id: int, lidos: Dict[int, Tuple[UploadFile, bytes]],
+    versoes: Optional[Dict[int, int]] = None,
+) -> Tuple[List[Arquivo], List[str]]:
+    """Grava os arquivos no storage. Em caso de erro, remove o que já foi gravado e repropaga."""
+    storage = get_storage_service()
+    gravados: List[str] = []
+    registros: List[Arquivo] = []
+    try:
+        for doc_id, (upload, content) in lidos.items():
+            chave = f"editais/{edital_id}/inscricoes/{inscricao.id}/{uuid.uuid4()}.pdf"
+            await storage.save_file_stream(chave, content)
+            gravados.append(chave)
+            registros.append(Arquivo(
+                inscricao_id=inscricao.id,
+                documento_exigido_id=doc_id,
+                chave=chave,
+                nome_original=(upload.filename or "documento.pdf")[:255],
+                sha256=hashlib.sha256(content).hexdigest(),
+                tamanho_bytes=len(content),
+                content_type="application/pdf",
+                versao=(versoes or {}).get(doc_id, 1),
+                ativo=True,
+                status_varredura="VALIDADO",
+            ))
+    except Exception:
+        await _remover_arquivos(gravados)
+        raise
+    return registros, gravados
+
+
+async def _remover_arquivos(chaves: List[str]) -> None:
+    storage = get_storage_service()
+    for chave in chaves:
+        try:
+            await storage.delete(chave)
+        except Exception:  # noqa: BLE001 - compensação não deve mascarar o erro original
+            logger.exception("Falha ao remover arquivo compensatório %s", chave)
+
+
+def _motivos_academicos(edital: Edital, vinculo_ativo: Optional[bool], curso: Optional[str], cr: Optional[Decimal]) -> List[str]:
+    motivos = []
+    if vinculo_ativo is False:
+        motivos.append("Discente sem vínculo ativo no sistema acadêmico.")
+    cursos_validos = {c.codigo_curso for c in edital.cursos} | {c.nome_curso for c in edital.cursos}
+    if not curso or curso not in cursos_validos:
+        motivos.append(f"Curso '{curso or 'não informado'}' não é elegível neste edital.")
+    if cr is None:
+        motivos.append("Coeficiente de rendimento (CR) não informado.")
+    elif cr < edital.cr_minimo:
+        motivos.append(f"CR ({cr:.2f}) inferior ao mínimo exigido ({edital.cr_minimo:.2f}).")
+    return motivos
+
+
+def _motivos_documentais(edital: Edital, doc_ids_enviados: set) -> List[str]:
+    return [
+        f"Documento obrigatório ausente: {d.nome}"
+        for d in edital.documentos_exigidos
+        if d.obrigatorio and d.id not in doc_ids_enviados
+    ]
 
 
 class InscricaoService:
@@ -26,192 +111,120 @@ class InscricaoService:
     async def submeter_candidatura(
         db: AsyncSession,
         edital_id: int,
-        estudante_id: int,
-        estudante_email: str,
+        estudante: Dict,
         arquivos_enviados: Dict[int, UploadFile],
-        ip_origem: str = "127.0.0.1"
+        curso_codigo: Optional[str],
+        cr_declarado: Optional[Decimal],
+        ip_origem: str,
     ) -> Inscricao:
-        """
-        Submete uma nova candidatura com upload em streaming e validação formal automática (INS-02, INS-03, RN-01 a RN-05).
-        """
-        # 1. Carrega edital
-        query_edital = (
-            select(Edital)
-            .where(Edital.id == edital_id)
-            .options(
-                selectinload(Edital.cursos),
-                selectinload(Edital.documentos_exigidos)
-            )
+        """Submete candidatura com validação formal automática (INS-02, INS-03, RN-01 a RN-04)."""
+        estudante_id = estudante["id"]
+        res_edital = await db.execute(
+            select(Edital).where(Edital.id == edital_id)
+            .options(selectinload(Edital.cursos), selectinload(Edital.documentos_exigidos))
         )
-        res_edital = await db.execute(query_edital)
         edital = res_edital.scalar_one_or_none()
         if not edital:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Edital não encontrado.")
 
-        # Valida status do edital e janela de submissão (RN-03)
-        if edital.status != "ABERTO":
-            raise HTTPException(
-                status_code=status.HTTP_409_CONFLICT,
-                detail=f"Inscrições indisponíveis: o edital não está aberto (status: {edital.status})."
-            )
-
         now = datetime.now(timezone.utc)
-        if now < edital.data_inicio_inscricao or now > edital.data_fim_inscricao:
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail="Fora do prazo regulamentar de inscrições do edital (RN-03)."
-            )
-
-        # 2. Regra RN-01: No máximo uma inscrição por edital
-        query_insc = select(Inscricao).where(
-            and_(Inscricao.edital_id == edital_id, Inscricao.estudante_id == estudante_id)
-        )
-        res_insc = await db.execute(query_insc)
-        if res_insc.scalar_one_or_none():
+        if edital.status != "ABERTO" or now < edital.data_inicio_inscricao or now > edital.data_fim_inscricao:
             raise HTTPException(
                 status_code=status.HTTP_409_CONFLICT,
-                detail="Candidato já possui inscrição registrada para este edital (RN-01)."
+                detail="As inscrições deste edital não estão abertas no momento.",
             )
 
-        # 3. Geração de Protocolo Atômico Sequencial
-        try:
-            seq_res = await db.execute(text("SELECT nextval('seq_protocolo_inscricao')"))
-            seq_val = seq_res.scalar()
-        except Exception:
-            seq_val = int(now.timestamp())
+        existente = await db.execute(
+            select(Inscricao.id).where(and_(Inscricao.edital_id == edital_id, Inscricao.estudante_id == estudante_id))
+        )
+        if existente.scalar_one_or_none():
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Você já possui inscrição neste edital.")
+
+        lidos = await _ler_e_validar_arquivos(edital, arquivos_enviados)
+
+        # Dados acadêmicos: oficiais (integração) ou declarados pelo estudante
+        dados_oficiais = await AcademicIntegrationClient.consultar_discente(estudante["email"], estudante.get("matricula"))
+        if dados_oficiais is not None:
+            vinculo_ativo = bool(dados_oficiais.get("vinculo_ativo"))
+            curso_codigo_final = dados_oficiais.get("curso_codigo")
+            cr = Decimal(str(dados_oficiais["cr_oficial"])) if dados_oficiais.get("cr_oficial") is not None else None
+        else:
+            vinculo_ativo = None
+            curso_codigo_final = curso_codigo
+            cr = cr_declarado
+
+        motivos = _motivos_academicos(edital, vinculo_ativo, curso_codigo_final, cr)
+        motivos += _motivos_documentais(edital, set(lidos.keys()))
+
+        if motivos:
+            status_inicial = "INDEFERIDA"
+        elif dados_oficiais is not None:
+            status_inicial = "HOMOLOGADA"
+        else:
+            status_inicial = "PENDENTE_VALIDACAO_VINCULO"
+
+        nome_curso = next(
+            (c.nome_curso for c in edital.cursos if c.codigo_curso == curso_codigo_final),
+            (dados_oficiais or {}).get("curso_nome") or curso_codigo_final,
+        )
+
+        seq_val = (await db.execute(text("SELECT nextval('seq_protocolo_inscricao')"))).scalar()
         protocolo = f"QUERO-{edital_id:04d}-{seq_val:05d}"
 
-        # 4. Validação de documentos obrigatórios (RN-04)
-        docs_obrigatorios = [d for d in edital.documentos_exigidos if d.obrigatorio]
-        motivos_indeferimento = []
-
-        for doc_obrig in docs_obrigatorios:
-            if doc_obrig.id not in arquivos_enviados:
-                motivos_indeferimento.append(f"Documento obrigatório ausente: {doc_obrig.nome}")
-
-        # 5. Consulta e congelamento acadêmico (RN-02, INT-01)
-        api_disponivel = True
-        try:
-            dados_acad = await AcademicIntegrationClient.consultar_discente(estudante_email)
-            if not dados_acad:
-                api_disponivel = False
-        except Exception:
-            api_disponivel = False
-
-        vinculo_ativo = None
-        curso_aluno = None
-        cr_aluno = None
-
-        if api_disponivel and dados_acad:
-            vinculo_ativo = dados_acad.get("vinculo_ativo", False)
-            curso_aluno = dados_acad.get("curso_nome") or dados_acad.get("curso_codigo")
-            cr_aluno = Decimal(str(dados_acad.get("cr_oficial", 0.0)))
-
-            # Valida elegibilidade acadêmica
-            if not vinculo_ativo:
-                motivos_indeferimento.append("Discente sem vínculo ativo no Sistema Acadêmico (RN-02).")
-
-            cursos_permitidos = [c.codigo_curso for c in edital.cursos]
-            aluno_codigo = dados_acad.get("curso_codigo")
-            if aluno_codigo and aluno_codigo not in cursos_permitidos:
-                motivos_indeferimento.append(f"Curso '{curso_aluno}' não contemplado nas vagas do edital (RN-02).")
-
-            if cr_aluno < edital.cr_minimo:
-                motivos_indeferimento.append(f"CR acumulado ({cr_aluno}) inferior ao CR mínimo exigido ({edital.cr_minimo}) (RN-02).")
-
-        # Determina status inicial conforme máquina de estados §7.2
-        if not api_disponivel:
-            status_inicial = "PENDENTE_VALIDACAO_VINCULO"
-        elif len(motivos_indeferimento) > 0:
-            status_inicial = "INDEFERIDA"
-        else:
-            status_inicial = "HOMOLOGADA"
-
-        # 6. Salva Inscrição
         inscricao = Inscricao(
             protocolo=protocolo,
             edital_id=edital_id,
             estudante_id=estudante_id,
             status=status_inicial,
-            motivos_indeferimento=motivos_indeferimento if motivos_indeferimento else None,
+            motivos_indeferimento=motivos or None,
             vinculo_ativo_congelado=vinculo_ativo,
-            curso_congelado=curso_aluno or "Não informado",
-            cr_congelado=cr_aluno or Decimal("0.00"),
+            curso_congelado=nome_curso,
+            cr_congelado=cr,
             data_submissao_original=now,
         )
         db.add(inscricao)
         await db.flush()
 
-        # 7. Salva Arquivos via ArmazenamentoDisco com validação %PDF- e SHA-256
-        storage = get_storage_service()
-        salvos = []
-
-        for doc_id, upload_file in arquivos_enviados.items():
-            content = await upload_file.read()
-            if len(content) > settings.MAX_UPLOAD_SIZE_BYTES:
-                raise HTTPException(
-                    status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-                    detail=f"Arquivo '{upload_file.filename}' excede o tamanho máximo de 10 MB (RN-04)."
-                )
-            if not content.startswith(MAGIC_PDF_BYTES):
-                raise HTTPException(
-                    status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-                    detail=f"Arquivo '{upload_file.filename}' não é um PDF válido com assinatura %PDF- (RN-04)."
-                )
-
-            sha256 = hashlib.sha256(content).hexdigest()
-            chave_logica = f"editais/{edital_id}/inscricoes/{inscricao.id}/{uuid.uuid4()}.pdf"
-            await storage.save_file_stream(chave_logica, content)
-            salvos.append(chave_logica)
-
-            arquivo = Arquivo(
-                inscricao_id=inscricao.id,
-                documento_exigido_id=doc_id,
-                chave=chave_logica,
-                nome_original=upload_file.filename or "documento.pdf",
-                sha256=sha256,
-                tamanho_bytes=len(content),
-                content_type="application/pdf",
-                versao=1,
-                ativo=True,
-                status_varredura="VALIDADO",
+        registros, gravados = await _gravar_arquivos(inscricao, edital_id, lidos)
+        try:
+            db.add_all(registros)
+            db.add(Notificacao(
+                usuario_id=estudante_id,
+                tipo="CONFIRMACAO_INSCRICAO",
+                titulo=f"Inscrição recebida - {edital.titulo}"[:200],
+                mensagem=(
+                    f"Sua inscrição foi registrada sob o protocolo {protocolo}. "
+                    f"Situação: {STATUS_INSCRICAO_LABEL.get(status_inicial, status_inicial)}."
+                ),
+            ))
+            await log_audit_action(
+                db=db, usuario_id=estudante_id, acao="SUBMETER_INSCRICAO", entidade="inscricoes",
+                entidade_id=inscricao.id,
+                dados_depois={"protocolo": protocolo, "status": status_inicial, "dados_oficiais": dados_oficiais is not None},
+                ip_origem=ip_origem,
             )
-            db.add(arquivo)
-
-        # 8. Notificação e Auditoria
-        notificacao = Notificacao(
-            usuario_id=estudante_id,
-            tipo="CONFIRMACAO_INSCRICAO",
-            titulo=f"Inscrição recebida com sucesso - {edital.titulo}",
-            mensagem=f"Sua candidatura no edital foi recebida sob protocolo {protocolo}. Status: {status_inicial}."
-        )
-        db.add(notificacao)
-
-        await log_audit_action(
-            db=db,
-            usuario_id=estudante_id,
-            acao="SUBMETER_INSCRICAO",
-            entidade="inscricoes",
-            entidade_id=inscricao.id,
-            dados_depois={"protocolo": protocolo, "status": status_inicial},
-            ip_origem=ip_origem,
-        )
-
-        await db.commit()
+            await db.commit()
+        except Exception:
+            await db.rollback()
+            await _remover_arquivos(gravados)
+            raise
         return await InscricaoService.get_inscricao_by_id(db, inscricao.id)
 
     @staticmethod
     async def get_inscricao_by_id(db: AsyncSession, inscricao_id: int) -> Inscricao:
-        query = (
+        res = await db.execute(
             select(Inscricao)
             .where(Inscricao.id == inscricao_id)
             .options(
                 selectinload(Inscricao.arquivos),
                 joinedload(Inscricao.estudante),
-                joinedload(Inscricao.edital)
+                joinedload(Inscricao.edital).selectinload(Edital.cursos),
+                joinedload(Inscricao.edital).selectinload(Edital.documentos_exigidos),
+                selectinload(Inscricao.avaliacao),
+                selectinload(Inscricao.recurso),
             )
+            .execution_options(populate_existing=True)
         )
-        res = await db.execute(query)
         inscricao = res.scalar_one_or_none()
         if not inscricao:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Inscrição não encontrada.")
@@ -219,15 +232,35 @@ class InscricaoService:
 
     @staticmethod
     async def listar_minhas_inscricoes(db: AsyncSession, estudante_id: int) -> List[Inscricao]:
-        query = (
+        res = await db.execute(
             select(Inscricao)
             .where(Inscricao.estudante_id == estudante_id)
             .options(
                 selectinload(Inscricao.arquivos),
-                joinedload(Inscricao.edital)
+                joinedload(Inscricao.edital),
+                selectinload(Inscricao.avaliacao),
+                selectinload(Inscricao.recurso),
             )
             .order_by(Inscricao.id.desc())
         )
+        return list(res.scalars().all())
+
+    @staticmethod
+    async def listar_inscricoes_edital(db: AsyncSession, edital_id: int, status_filtro: Optional[str]) -> List[Inscricao]:
+        query = (
+            select(Inscricao)
+            .where(Inscricao.edital_id == edital_id)
+            .options(
+                selectinload(Inscricao.arquivos),
+                joinedload(Inscricao.estudante),
+                joinedload(Inscricao.edital),
+                selectinload(Inscricao.avaliacao),
+                selectinload(Inscricao.recurso),
+            )
+            .order_by(Inscricao.id.asc())
+        )
+        if status_filtro:
+            query = query.where(Inscricao.status == status_filtro)
         res = await db.execute(query)
         return list(res.scalars().all())
 
@@ -237,75 +270,61 @@ class InscricaoService:
         inscricao_id: int,
         estudante_id: int,
         arquivos_retificados: Dict[int, UploadFile],
-        ip_origem: str = "127.0.0.1"
+        ip_origem: str,
     ) -> Inscricao:
-        """
-        Substitui PDFs durante o prazo regulamentar mantendo protocolo, data original e CR congelado (INS-05, RN-04, RN-09).
-        """
+        """Substitui PDFs no prazo, mantendo protocolo, data original e dados acadêmicos congelados (INS-05)."""
         inscricao = await InscricaoService.get_inscricao_by_id(db, inscricao_id)
         if inscricao.estudante_id != estudante_id:
             raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Permissão negada.")
+        if inscricao.status == "DESISTENTE":
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Inscrições desistentes não podem ser retificadas.")
 
         edital = inscricao.edital
-        if edital.status != "ABERTO":
-            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Edital não está mais aberto para retificações.")
-
         now = datetime.now(timezone.utc)
-        if now > edital.data_fim_inscricao:
-            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Prazo de inscrição encerrado.")
+        if edital.status != "ABERTO" or now > edital.data_fim_inscricao:
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="O prazo para retificação está encerrado.")
 
-        storage = get_storage_service()
+        lidos = await _ler_e_validar_arquivos(edital, arquivos_retificados)
 
-        for doc_id, upload_file in arquivos_retificados.items():
-            content = await upload_file.read()
-            if len(content) > settings.MAX_UPLOAD_SIZE_BYTES:
-                raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=f"Arquivo '{upload_file.filename}' excede 10 MB.")
-            if not content.startswith(MAGIC_PDF_BYTES):
-                raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=f"Arquivo '{upload_file.filename}' não é PDF válido.")
-
-            # Desativa arquivo anterior para este documento exigido
+        versoes = {
+            doc_id: max([a.versao for a in inscricao.arquivos if a.documento_exigido_id == doc_id] + [0]) + 1
+            for doc_id in lidos
+        }
+        registros, gravados = await _gravar_arquivos(inscricao, edital.id, lidos, versoes)
+        try:
             for arq in inscricao.arquivos:
-                if arq.documento_exigido_id == doc_id and arq.ativo:
+                if arq.documento_exigido_id in lidos and arq.ativo:
                     arq.ativo = False
+            db.add_all(registros)
+            inscricao.data_ultima_retificacao = now
 
-            nova_versao = max([a.versao for a in inscricao.arquivos if a.documento_exigido_id == doc_id] + [0]) + 1
-            chave_logica = f"editais/{edital.id}/inscricoes/{inscricao.id}/{uuid.uuid4()}.pdf"
-            await storage.save_file_stream(chave_logica, content)
+            # Revalidação completa: documentos ativos + critérios acadêmicos congelados
+            docs_ativos = {a.documento_exigido_id for a in inscricao.arquivos if a.ativo} | set(lidos.keys())
+            status_anterior = inscricao.status
+            if inscricao.status in ("INDEFERIDA", "PENDENTE_VALIDACAO_VINCULO"):
+                motivos = _motivos_academicos(
+                    edital, inscricao.vinculo_ativo_congelado, inscricao.curso_congelado, inscricao.cr_congelado
+                ) + _motivos_documentais(edital, docs_ativos)
+                inscricao.motivos_indeferimento = motivos or None
+                if motivos:
+                    inscricao.status = "INDEFERIDA"
+                elif inscricao.vinculo_ativo_congelado:
+                    inscricao.status = "HOMOLOGADA"
+                else:
+                    inscricao.status = "PENDENTE_VALIDACAO_VINCULO"
 
-            novo_arq = Arquivo(
-                inscricao_id=inscricao.id,
-                documento_exigido_id=doc_id,
-                chave=chave_logica,
-                nome_original=upload_file.filename or "retificado.pdf",
-                sha256=hashlib.sha256(content).hexdigest(),
-                tamanho_bytes=len(content),
-                content_type="application/pdf",
-                versao=nova_versao,
-                ativo=True,
-                status_varredura="VALIDADO",
+            await log_audit_action(
+                db=db, usuario_id=estudante_id, acao="RETIFICAR_INSCRICAO", entidade="inscricoes",
+                entidade_id=inscricao.id,
+                dados_antes={"status": status_anterior},
+                dados_depois={"status": inscricao.status, "documentos_substituidos": sorted(lidos.keys())},
+                ip_origem=ip_origem,
             )
-            db.add(novo_arq)
-
-        inscricao.data_ultima_retificacao = now
-
-        # Se os motivos de indeferimento anteriores eram puramente documentais, podemos reavaliar
-        # Se os critérios acadêmicos eram ok, homologa
-        if inscricao.status == "INDEFERIDA":
-            if inscricao.vinculo_ativo_congelado and inscricao.cr_congelado >= edital.cr_minimo:
-                inscricao.status = "HOMOLOGADA"
-                inscricao.motivos_indeferimento = None
-
-        await log_audit_action(
-            db=db,
-            usuario_id=estudante_id,
-            acao="RETIFICAR_INSCRICAO",
-            entidade="inscricoes",
-            entidade_id=inscricao.id,
-            dados_depois={"data_retificacao": str(now), "status": inscricao.status},
-            ip_origem=ip_origem,
-        )
-
-        await db.commit()
+            await db.commit()
+        except Exception:
+            await db.rollback()
+            await _remover_arquivos(gravados)
+            raise
         return await InscricaoService.get_inscricao_by_id(db, inscricao.id)
 
     @staticmethod
@@ -314,33 +333,31 @@ class InscricaoService:
         inscricao_id: int,
         estudante_id: int,
         data: InscricaoDesistirRequest,
-        ip_origem: str = "127.0.0.1"
+        ip_origem: str,
     ) -> Inscricao:
-        """
-        Marca inscrição como Desistente antes do resultado preliminar (INS-07).
-        """
+        """Registra desistência antes da publicação do resultado preliminar (INS-07)."""
         inscricao = await InscricaoService.get_inscricao_by_id(db, inscricao_id)
         if inscricao.estudante_id != estudante_id:
             raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Permissão negada.")
+        if inscricao.status == "DESISTENTE":
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="A desistência já foi registrada.")
 
         edital = inscricao.edital
-        if edital.status in ["RESULTADO_PRELIMINAR", "EM_RECURSO", "EM_HOMOLOGACAO_FINAL", "ENCERRADO"]:
-            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Desistência não permitida após a publicação do resultado preliminar (INS-07).")
+        if edital.status in FASES_POS_PRELIMINAR or edital.status == "CANCELADO":
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="Não é possível desistir após a publicação do resultado preliminar ou em edital cancelado.",
+            )
 
         status_anterior = inscricao.status
         inscricao.status = "DESISTENTE"
-
         await log_audit_action(
-            db=db,
-            usuario_id=estudante_id,
-            acao="DESISTIR_INSCRICAO",
-            entidade="inscricoes",
+            db=db, usuario_id=estudante_id, acao="DESISTIR_INSCRICAO", entidade="inscricoes",
             entidade_id=inscricao.id,
             dados_antes={"status": status_anterior},
             dados_depois={"status": "DESISTENTE", "motivo": data.motivo},
             ip_origem=ip_origem,
         )
-
         await db.commit()
         return await InscricaoService.get_inscricao_by_id(db, inscricao.id)
 
@@ -350,41 +367,53 @@ class InscricaoService:
         inscricao_id: int,
         data: InscricaoReanalisarRequest,
         user_id: int,
-        ip_origem: str = "127.0.0.1"
+        ip_origem: str,
     ) -> Inscricao:
-        """
-        Reanálise manual de indeferimento pelo Pró-Reitor até o início da avaliação (RN-05).
-        """
+        """Análise manual pela Pró-Reitoria de inscrições pendentes ou indeferidas, antes da avaliação (RN-05)."""
         inscricao = await InscricaoService.get_inscricao_by_id(db, inscricao_id)
         edital = inscricao.edital
 
-        now = datetime.now(timezone.utc)
-        if now >= edital.data_inicio_avaliacao or edital.status in ["EM_AVALIACAO", "RESULTADO_PRELIMINAR", "ENCERRADO"]:
+        if inscricao.status not in ("INDEFERIDA", "PENDENTE_VALIDACAO_VINCULO"):
             raise HTTPException(
                 status_code=status.HTTP_409_CONFLICT,
-                detail="Reanálise manual só pode ser realizada antes do início da avaliação de mérito (RN-05)."
+                detail="Somente inscrições pendentes de análise ou indeferidas podem ser reanalisadas.",
+            )
+        if edital.status not in ("ABERTO", "INSCRICOES_ENCERRADAS"):
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="A análise manual só é permitida antes do início da avaliação de mérito.",
             )
 
         status_ant = inscricao.status
         if data.deferido:
             inscricao.status = "HOMOLOGADA"
             inscricao.motivos_indeferimento = None
+            if inscricao.vinculo_ativo_congelado is None:
+                inscricao.vinculo_ativo_congelado = True
         else:
             inscricao.status = "INDEFERIDA"
+            motivos = list(inscricao.motivos_indeferimento or [])
+            motivos.append(f"Análise da Pró-Reitoria: {data.justificativa}")
+            inscricao.motivos_indeferimento = motivos
 
         inscricao.reanalisada_por = user_id
         inscricao.justificativa_reanalise = data.justificativa
 
+        db.add(Notificacao(
+            usuario_id=inscricao.estudante_id,
+            tipo="ANALISE_INSCRICAO",
+            titulo=f"Inscrição analisada - {edital.titulo}"[:200],
+            mensagem=(
+                f"Sua inscrição {inscricao.protocolo} foi "
+                f"{'homologada' if data.deferido else 'indeferida'} pela Pró-Reitoria. Justificativa: {data.justificativa}"
+            ),
+        ))
         await log_audit_action(
-            db=db,
-            usuario_id=user_id,
-            acao="REANALISAR_INSCRICAO",
-            entidade="inscricoes",
+            db=db, usuario_id=user_id, acao="REANALISAR_INSCRICAO", entidade="inscricoes",
             entidade_id=inscricao.id,
             dados_antes={"status": status_ant},
             dados_depois={"status": inscricao.status, "justificativa": data.justificativa},
             ip_origem=ip_origem,
         )
-
         await db.commit()
         return await InscricaoService.get_inscricao_by_id(db, inscricao.id)

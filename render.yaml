@@ -6,14 +6,15 @@ databases:
     region: ohio
 
 services:
-  # 1. Backend RESTful API (Python FastAPI + PostgreSQL 16)
+  # 1. API (FastAPI + PostgreSQL 16)
   - type: web
     name: quero-backend
-    env: python
+    runtime: python
     region: ohio
     plan: free
+    healthCheckPath: /api/v1/health
     buildCommand: cd backend && pip install -r requirements.txt
-    startCommand: cd backend && alembic upgrade head && uvicorn app.main:app --host 0.0.0.0 --port $PORT
+    startCommand: cd backend && alembic upgrade head && uvicorn app.main:app --host 0.0.0.0 --port $PORT --proxy-headers --forwarded-allow-ips="*"
     envVars:
       - key: PYTHON_VERSION
         value: 3.12.8
@@ -27,23 +28,44 @@ services:
         value: info
       - key: JWT_SECRET_KEY
         generateValue: true
-      - key: STORAGE_PATH
-        value: ./data/documentos
+      # O disco do plano gratuito é apagado a cada deploy: os documentos ficam no PostgreSQL.
+      - key: STORAGE_BACKEND
+        value: database
+      - key: DB_POOL_SIZE
+        value: "5"
+      - key: DB_MAX_OVERFLOW
+        value: "5"
       - key: CORS_ORIGINS
-        value: "*"
-      - key: USE_MOCK_AUTH
+        value: https://quero-frontend.onrender.com
+      - key: CORS_ORIGIN_REGEX
+        value: ^https://quero-frontend(-[a-z0-9]+)*\.onrender\.com$
+      - key: ALLOW_STUDENT_SIGNUP
         value: "true"
+      # Senha atribuída às contas já existentes que ainda não têm senha (ex.: Pró-Reitoria da carga inicial).
+      # Defina no painel do Render; não é versionada.
+      - key: INITIAL_USERS_PASSWORD
+        sync: false
 
-  # 2. Frontend SPA (React + Vite + Tailwind CSS)
+  # 2. Frontend (React + Vite + Tailwind CSS)
   - type: web
     name: quero-frontend
-    env: static
-    buildCommand: cd frontend && npm install && npm run build
+    runtime: static
+    buildCommand: cd frontend && npm ci && npm run build
     staticPublishPath: ./frontend/dist
     routes:
       - type: rewrite
         source: /*
         destination: /index.html
+    headers:
+      - path: /*
+        name: X-Frame-Options
+        value: DENY
+      - path: /*
+        name: X-Content-Type-Options
+        value: nosniff
+      - path: /*
+        name: Referrer-Policy
+        value: strict-origin-when-cross-origin
     envVars:
       - key: VITE_API_BASE_URL
         value: https://quero-backend.onrender.com

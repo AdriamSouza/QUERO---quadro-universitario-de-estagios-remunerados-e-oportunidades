@@ -1,44 +1,42 @@
-import React, { useState, useEffect } from 'react';
-import { ShieldCheck, CheckCircle2, XCircle, FileText, Download, AlertCircle, Loader2 } from 'lucide-react';
+import React, { useEffect, useState } from 'react';
+import { ClipboardCheck, Download, FileText, Loader2 } from 'lucide-react';
 import { fetchEditais } from '../api/editais';
-import { apiClient } from '../api/client';
-import { InscriptionDetail } from '../api/inscricoes';
+import { downloadArquivo, downloadComprovante, fetchEditalApplications, InscriptionDetail, reanalisarInscricao } from '../api/inscricoes';
+import { getErrorMessage } from '../api/client';
 import { Edital } from '../types/edital';
+import { EditalSelect, EmptyState, InscricaoStatusBadge, Modal, PageHeader, Spinner, btn, inputClass } from '../components/ui';
+import { useToast } from '../components/Toast';
+import { formatDateTime, formatNumber, INSCRICAO_STATUS_LABEL } from '../utils/format';
 
 export const DocumentReviewPage: React.FC = () => {
+  const toast = useToast();
   const [editais, setEditais] = useState<Edital[]>([]);
-  const [selectedEditalId, setSelectedEditalId] = useState<number | null>(null);
-  const [inscrições, setInscricoes] = useState<InscriptionDetail[]>([]);
+  const [editalId, setEditalId] = useState<number | null>(null);
+  const [filtro, setFiltro] = useState('');
+  const [inscricoes, setInscricoes] = useState<InscriptionDetail[]>([]);
   const [loading, setLoading] = useState(false);
-  const [selectedInscricao, setSelectedInscricao] = useState<InscriptionDetail | null>(null);
+  const [selecionada, setSelecionada] = useState<InscriptionDetail | null>(null);
   const [justificativa, setJustificativa] = useState('');
   const [saving, setSaving] = useState(false);
 
   useEffect(() => {
-    const loadEditais = async () => {
-      try {
-        const res = await fetchEditais();
-        setEditais(res.items);
-        if (res.items.length > 0) {
-          setSelectedEditalId(res.items[0].id);
-        }
-      } catch (err) {
-        console.error(err);
-      }
-    };
-    loadEditais();
+    fetchEditais()
+      .then((res) => {
+        const lista = res.items.filter((e) => e.status !== 'RASCUNHO');
+        setEditais(lista);
+        if (lista.length) setEditalId(lista[0].id);
+      })
+      .catch((err) => toast.error(getErrorMessage(err)));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  const loadInscricoes = async () => {
-    if (!selectedEditalId) return;
+  const load = async () => {
+    if (!editalId) return;
     setLoading(true);
     try {
-      // Busca inscrições deste edital
-      const res = await apiClient.get<any>(`/editais/${selectedEditalId}`);
-      // As inscrições podem ser carregadas pelo endpoint de avaliacoes ou geral
-      const avRes = await apiClient.get<InscriptionDetail[]>(`/editais/${selectedEditalId}/avaliacoes`);
-      setInscricoes(avRes.data);
+      setInscricoes(await fetchEditalApplications(editalId, filtro || undefined));
     } catch (err) {
+      toast.error(getErrorMessage(err));
       setInscricoes([]);
     } finally {
       setLoading(false);
@@ -46,147 +44,133 @@ export const DocumentReviewPage: React.FC = () => {
   };
 
   useEffect(() => {
-    loadInscricoes();
-  }, [selectedEditalId]);
+    load();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [editalId, filtro]);
 
-  const handleReanalisar = async (deferido: boolean) => {
-    if (!selectedInscricao) return;
-    if (justificativa.trim().length < 20) {
-      alert('A justificativa de reanálise deve possuir pelo menos 20 caracteres (RN-05).');
-      return;
-    }
+  const edital = editais.find((e) => e.id === editalId);
+  const analiseAberta = edital ? ['ABERTO', 'INSCRICOES_ENCERRADAS'].includes(edital.status) : false;
 
+  const decidir = async (deferido: boolean) => {
+    if (!selecionada) return;
+    if (justificativa.trim().length < 20) return toast.error('A justificativa deve ter pelo menos 20 caracteres.');
     setSaving(true);
     try {
-      await apiClient.post(`/inscricoes/${selectedInscricao.id}/reanalisar`, {
-        deferido,
-        justificativa,
-      });
-      alert(deferido ? 'Inscrição homologada em reanálise manual!' : 'Indeferimento mantido.');
-      setSelectedInscricao(null);
+      await reanalisarInscricao(selecionada.id, deferido, justificativa.trim());
+      toast.success(deferido ? 'Inscrição homologada.' : 'Inscrição indeferida.');
+      setSelecionada(null);
       setJustificativa('');
-      loadInscricoes();
-    } catch (err: any) {
-      alert(err.response?.data?.detail || 'Erro ao reanalisar inscrição.');
+      load();
+    } catch (err) {
+      toast.error(getErrorMessage(err));
     } finally {
       setSaving(false);
     }
   };
 
+  const pendentes = inscricoes.filter((i) => i.status === 'PENDENTE_VALIDACAO_VINCULO').length;
+
   return (
     <div className="max-w-6xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
-      <div className="mb-8">
-        <h2 className="text-3xl font-bold text-slate-900 tracking-tight">Reanálise de Inscrições (Pró-Reitoria)</h2>
-        <p className="mt-2 text-slate-600 text-sm">
-          Reanálise manual de indeferimentos de candidaturas até a data de início da avaliação de mérito (RN-05, RN-14).
-        </p>
-      </div>
+      <PageHeader
+        title="Inscrições"
+        subtitle="Confira a documentação dos candidatos e homologue ou indefira inscrições até o início da avaliação de mérito."
+      />
 
-      {/* Seletor de Edital */}
-      <div className="bg-white p-4 rounded-xl border border-slate-200 shadow-sm mb-6 flex flex-col sm:flex-row items-center justify-between gap-4">
-        <div className="w-full sm:w-auto">
-          <label className="block text-xs font-semibold text-slate-500 mb-1">Selecionar Edital:</label>
-          <select
-            value={selectedEditalId || ''}
-            onChange={(e) => setSelectedEditalId(Number(e.target.value))}
-            className="w-full sm:w-96 py-2 px-3 border border-slate-300 rounded-lg text-sm bg-white font-medium text-slate-800"
-          >
-            {editais.map((e) => (
-              <option key={e.id} value={e.id}>
-                Edital #{e.id} &mdash; {e.titulo}
-              </option>
-            ))}
-          </select>
-        </div>
-      </div>
+      <EditalSelect
+        editais={editais}
+        value={editalId}
+        onChange={setEditalId}
+        right={
+          <div className="flex items-end gap-3">
+            <div>
+              <label className="block text-xs font-semibold text-slate-500 mb-1">Situação</label>
+              <select value={filtro} onChange={(e) => setFiltro(e.target.value)} className="py-2 px-3 border border-slate-300 rounded-lg text-sm bg-white">
+                <option value="">Todas</option>
+                {Object.entries(INSCRICAO_STATUS_LABEL).map(([k, v]) => <option key={k} value={k}>{v}</option>)}
+              </select>
+            </div>
+            <p className="text-xs text-slate-500 pb-2">{inscricoes.length} inscrição(ões){pendentes ? ` · ${pendentes} aguardando análise` : ''}</p>
+          </div>
+        }
+      />
 
       {loading ? (
-        <div className="text-center py-16">
-          <div className="animate-spin rounded-full h-10 w-10 border-b-2 border-blue-600 mx-auto"></div>
-          <p className="mt-4 text-slate-500 text-sm">Carregando inscrições...</p>
-        </div>
-      ) : inscrições.length === 0 ? (
-        <div className="text-center py-16 bg-white rounded-xl border border-slate-200">
-          <ShieldCheck className="h-12 w-12 text-slate-400 mx-auto mb-3" />
-          <h3 className="text-lg font-medium text-slate-900">Nenhuma inscrição com pendência de reanálise</h3>
-          <p className="text-sm text-slate-500 mt-1">Todas as candidaturas foram validadas pelo processamento formal automático.</p>
-        </div>
+        <Spinner label="Carregando inscrições..." />
+      ) : inscricoes.length === 0 ? (
+        <EmptyState icon={<ClipboardCheck className="h-12 w-12" />} title="Nenhuma inscrição encontrada" description="Não há inscrições com os filtros selecionados." />
       ) : (
-        <div className="space-y-4">
-          {inscrições.map((insc) => (
-            <div
-              key={insc.id}
-              className="bg-white rounded-xl border border-slate-200 p-6 shadow-sm flex flex-col md:flex-row md:items-center justify-between gap-4"
-            >
-              <div className="space-y-1">
-                <div className="flex items-center space-x-2">
-                  <span className="font-mono text-xs font-bold text-blue-700 bg-blue-50 px-2 py-0.5 rounded border border-blue-100">
-                    {insc.protocolo}
-                  </span>
-                  <span className="text-xs px-2 py-0.5 rounded font-semibold bg-emerald-50 text-emerald-700">
-                    {insc.status}
-                  </span>
+        <div className="space-y-3">
+          {inscricoes.map((insc) => {
+            const ativos = insc.arquivos.filter((a) => a.ativo);
+            const podeAnalisar = analiseAberta && ['PENDENTE_VALIDACAO_VINCULO', 'INDEFERIDA'].includes(insc.status);
+            return (
+              <div key={insc.id} className="bg-white rounded-xl border border-slate-200 p-5 shadow-sm">
+                <div className="flex flex-col md:flex-row md:items-start justify-between gap-4">
+                  <div className="space-y-1.5 flex-1">
+                    <div className="flex flex-wrap items-center gap-2">
+                      <span className="font-mono text-xs font-bold text-blue-700 bg-blue-50 px-2 py-0.5 rounded border border-blue-100">{insc.protocolo}</span>
+                      <InscricaoStatusBadge status={insc.status} />
+                    </div>
+                    <h3 className="text-base font-bold text-slate-900">{insc.nome_estudante}</h3>
+                    <p className="text-xs text-slate-500">
+                      {insc.email_estudante} · Matrícula {insc.matricula_estudante || '-'} · {insc.curso_congelado} · CR {formatNumber(insc.cr_congelado)}
+                      {insc.vinculo_ativo_congelado === null || insc.vinculo_ativo_congelado === undefined ? ' (declarado)' : ''}
+                    </p>
+                    <p className="text-xs text-slate-400">Inscrição em {formatDateTime(insc.data_submissao_original)}</p>
+                    {insc.motivos_indeferimento && insc.motivos_indeferimento.length > 0 && (
+                      <ul className="text-xs text-red-700 list-disc list-inside">
+                        {insc.motivos_indeferimento.map((m) => <li key={m}>{m}</li>)}
+                      </ul>
+                    )}
+                    <div className="flex flex-wrap gap-2 pt-1">
+                      {ativos.map((a) => (
+                        <button
+                          key={a.id}
+                          onClick={() => downloadArquivo(a).catch((err) => toast.error(getErrorMessage(err)))}
+                          className="inline-flex items-center text-xs px-2.5 py-1 rounded-md bg-slate-100 hover:bg-slate-200 text-slate-700"
+                        >
+                          <FileText className="h-3.5 w-3.5 mr-1" /> {a.nome_original}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                  <div className="flex flex-wrap gap-2">
+                    <button onClick={() => downloadComprovante(insc.id, insc.protocolo).catch((err) => toast.error(getErrorMessage(err)))} className={btn.secondary}>
+                      <Download className="h-4 w-4 mr-1.5" /> Comprovante
+                    </button>
+                    {podeAnalisar && (
+                      <button onClick={() => setSelecionada(insc)} className={btn.primary}>Analisar</button>
+                    )}
+                  </div>
                 </div>
-                <h3 className="text-base font-bold text-slate-900">{insc.nome_estudante || `Estudante #${insc.estudante_id}`}</h3>
-                <p className="text-xs text-slate-500">Curso: {insc.curso_congelado} | CR: {Number(insc.cr_congelado).toFixed(2)}</p>
               </div>
-
-              <button
-                onClick={() => setSelectedInscricao(insc)}
-                className="px-4 py-2 bg-blue-600 text-white rounded-lg text-xs font-semibold hover:bg-blue-700 transition"
-              >
-                Reanalisar Candidatura
-              </button>
-            </div>
-          ))}
+            );
+          })}
         </div>
       )}
 
-      {/* Modal Reanálise */}
-      {selectedInscricao && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/60 backdrop-blur-sm p-4">
-          <div className="bg-white rounded-2xl shadow-xl max-w-lg w-full border border-slate-200 p-6">
-            <h3 className="text-lg font-bold text-slate-900 mb-1">Reanálise Manual de Homologação (RN-05)</h3>
-            <p className="text-xs text-slate-500 mb-4">Inscrição: {selectedInscricao.protocolo}</p>
-
-            <div className="mb-4">
-              <label className="block text-xs font-semibold text-slate-700 mb-1">
-                Justificativa Obrigatória (mínimo 20 caracteres):
-              </label>
-              <textarea
-                rows={4}
-                value={justificativa}
-                onChange={(e) => setJustificativa(e.target.value)}
-                placeholder="Informe a motivação para alterar a decisão formal..."
-                className="w-full p-2.5 border border-slate-300 rounded-lg text-xs focus:ring-2 focus:ring-blue-500"
-              />
-            </div>
-
-            <div className="flex justify-end gap-2">
-              <button
-                onClick={() => setSelectedInscricao(null)}
-                className="px-4 py-2 border border-slate-200 rounded-lg text-xs text-slate-700 hover:bg-slate-50"
-              >
-                Cancelar
+      {selecionada && (
+        <Modal
+          title="Análise da inscrição"
+          subtitle={`${selecionada.nome_estudante} · ${selecionada.protocolo}`}
+          onClose={() => setSelecionada(null)}
+          footer={
+            <>
+              <button onClick={() => setSelecionada(null)} className={btn.secondary}>Cancelar</button>
+              <button onClick={() => decidir(false)} disabled={saving} className={btn.danger}>Indeferir</button>
+              <button onClick={() => decidir(true)} disabled={saving} className={btn.success}>
+                {saving && <Loader2 className="h-4 w-4 mr-1.5 animate-spin" />} Homologar
               </button>
-              <button
-                onClick={() => handleReanalisar(false)}
-                disabled={saving}
-                className="px-4 py-2 bg-red-600 text-white rounded-lg text-xs font-semibold hover:bg-red-700"
-              >
-                Manter Indeferida
-              </button>
-              <button
-                onClick={() => handleReanalisar(true)}
-                disabled={saving}
-                className="px-5 py-2 bg-emerald-600 text-white rounded-lg text-xs font-semibold hover:bg-emerald-700 flex items-center"
-              >
-                {saving && <Loader2 className="h-3.5 w-3.5 mr-1 animate-spin" />}
-                Homologar Inscrição
-              </button>
-            </div>
-          </div>
-        </div>
+            </>
+          }
+        >
+          <p className="text-sm text-slate-600 mb-3">
+            Confira se o histórico comprova o vínculo ativo, o curso e o CR informados pelo candidato.
+          </p>
+          <label className="block text-xs font-semibold text-slate-700 mb-1">Justificativa (mínimo de 20 caracteres)</label>
+          <textarea rows={4} value={justificativa} onChange={(e) => setJustificativa(e.target.value)} className={inputClass} />
+        </Modal>
       )}
     </div>
   );

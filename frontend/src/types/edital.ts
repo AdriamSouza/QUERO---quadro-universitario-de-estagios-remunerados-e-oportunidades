@@ -27,12 +27,12 @@ export interface Edital {
   descricao: string;
   categoria: 'ESTAGIO' | 'MONITORIA' | 'BOLSA';
   modalidade: string;
-  valor_bolsa: number;
+  valor_bolsa: number | string;
   carga_horaria_semanal: number;
   vagas: number;
-  cr_minimo: number;
+  cr_minimo: number | string;
   prazo_recurso_horas: number;
-  criterios_pontuacao?: Record<string, any>;
+  criterios_pontuacao?: Record<string, unknown> | unknown[];
   criterios_desempate?: string[];
   status: string;
   data_inicio_inscricao: string;
@@ -40,7 +40,8 @@ export interface Edital {
   data_inicio_avaliacao: string;
   data_resultado_preliminar: string;
   data_homologacao_final: string;
-  justificativa_cancelamento?: string;
+  justificativa_cancelamento?: string | null;
+  data_publicacao_preliminar?: string | null;
   criado_por?: number;
   criado_em: string;
   cursos?: EditalCurso[];

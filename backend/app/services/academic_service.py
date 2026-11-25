@@ -1,55 +1,49 @@
-from typing import Dict, Any, Optional
+"""
+Integração com o Sistema Acadêmico institucional (RN-02, INT-01).
+
+Quando ACADEMIC_API_URL está configurada, o vínculo, o curso e o CR oficial são consultados no
+sistema acadêmico e congelados no ato da inscrição. Sem integração configurada (ou se o serviço
+estiver indisponível), a inscrição usa os dados declarados pelo estudante e fica com status
+PENDENTE_VALIDACAO_VINCULO, aguardando conferência documental pela Pró-Reitoria.
+"""
+import logging
+import os
+from typing import Any, Dict, Optional
+
+import httpx
+
+logger = logging.getLogger(__name__)
+
+ACADEMIC_API_URL = os.getenv("ACADEMIC_API_URL", "").rstrip("/")
+ACADEMIC_API_TOKEN = os.getenv("ACADEMIC_API_TOKEN", "")
+ACADEMIC_API_TIMEOUT = float(os.getenv("ACADEMIC_API_TIMEOUT", "5"))
 
 
 class AcademicIntegrationClient:
-    """
-    Cliente simulado de integração com o Sistema Acadêmico institucional (SisAcad).
-    Permite validar vínculo discente, curso matriculado e CR oficial congelado no ato da inscrição (RN-02, RF-17, RF-24).
-    """
 
-    MOCK_DISCENTES: Dict[str, Dict[str, Any]] = {
-        "estudante@faculdade.edu.br": {
-            "matricula": "2024001001",
-            "nome": "João Silva",
-            "vinculo_ativo": True,
-            "curso_codigo": "CC",
-            "curso_nome": "Ciência da Computação",
-            "semestre_atual": 5,
-            "cr_oficial": 8.75,
-        },
-        "maria.aluna@faculdade.edu.br": {
-            "matricula": "2023002002",
-            "nome": "Maria Eduarda",
-            "vinculo_ativo": True,
-            "curso_codigo": "SI",
-            "curso_nome": "Sistemas de Informação",
-            "semestre_atual": 4,
-            "cr_oficial": 7.40,
-        },
-        "lucas.inativo@faculdade.edu.br": {
-            "matricula": "2022003003",
-            "nome": "Lucas Trancado",
-            "vinculo_ativo": False,
-            "curso_codigo": "CC",
-            "curso_nome": "Ciência da Computação",
-            "semestre_atual": 6,
-            "cr_oficial": 5.20,
-        }
-    }
+    @staticmethod
+    def configurado() -> bool:
+        return bool(ACADEMIC_API_URL)
 
     @classmethod
-    async def consultar_discente(cls, email: str) -> Optional[Dict[str, Any]]:
-        """Simula requisição com timeout e fallback (RF-24)."""
-        if email in cls.MOCK_DISCENTES:
-            return cls.MOCK_DISCENTES[email]
-
-        # Discente padrão fallback
-        return {
-            "matricula": f"2024{abs(hash(email)) % 900000 + 100000}",
-            "nome": email.split("@")[0].replace(".", " ").title(),
-            "vinculo_ativo": True,
-            "curso_codigo": "CC",
-            "curso_nome": "Ciência da Computação",
-            "semestre_atual": 3,
-            "cr_oficial": 7.50,
-        }
+    async def consultar_discente(cls, email: str, matricula: Optional[str] = None) -> Optional[Dict[str, Any]]:
+        """
+        Retorna {"matricula", "vinculo_ativo", "curso_codigo", "curso_nome", "cr_oficial"} ou None
+        quando a integração não está configurada ou não respondeu.
+        """
+        if not cls.configurado():
+            return None
+        headers = {"Authorization": f"Bearer {ACADEMIC_API_TOKEN}"} if ACADEMIC_API_TOKEN else {}
+        params = {"email": email}
+        if matricula:
+            params["matricula"] = matricula
+        try:
+            async with httpx.AsyncClient(timeout=ACADEMIC_API_TIMEOUT) as client:
+                resp = await client.get(f"{ACADEMIC_API_URL}/discentes", params=params, headers=headers)
+            if resp.status_code == 404:
+                return {"vinculo_ativo": False}
+            resp.raise_for_status()
+            return resp.json()
+        except (httpx.HTTPError, ValueError) as exc:
+            logger.warning("Sistema acadêmico indisponível: %s", exc)
+            return None

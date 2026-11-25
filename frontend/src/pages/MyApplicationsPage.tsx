@@ -1,22 +1,102 @@
-import React, { useState, useEffect } from 'react';
-import { FileText, Clock, AlertTriangle, CheckCircle, Download, CornerUpRight, Loader2, Ban } from 'lucide-react';
-import { fetchMyApplications, downloadComprovante, desistirInscricao, InscriptionDetail } from '../api/inscricoes';
-import { apiClient } from '../api/client';
+import React, { useEffect, useState } from 'react';
+import { Ban, CornerUpRight, Download, ExternalLink, FileText, Loader2, Upload } from 'lucide-react';
+import {
+  desistirInscricao, downloadComprovante, fetchMyApplications, InscriptionDetail, interporRecurso, retificarInscricao,
+} from '../api/inscricoes';
+import { fetchEditalById } from '../api/editais';
+import { getErrorMessage } from '../api/client';
+import { Edital } from '../types/edital';
+import { EditalStatusBadge, EmptyState, InscricaoStatusBadge, Modal, PageHeader, Spinner, btn, inputClass } from '../components/ui';
+import { useToast } from '../components/Toast';
+import { formatDate, formatNumber } from '../utils/format';
 
-export const MyApplicationsPage: React.FC = () => {
-  const [inscrições, setInscricoes] = useState<InscriptionDetail[]>([]);
+const RECURSO_LABEL: Record<string, string> = {
+  ABERTO: 'Recurso em análise',
+  EM_ANALISE: 'Recurso em análise',
+  DEFERIDO: 'Recurso deferido',
+  INDEFERIDO: 'Recurso indeferido',
+};
+
+const RetificarModal: React.FC<{ inscricao: InscriptionDetail; onClose: () => void; onDone: () => void }> = ({ inscricao, onClose, onDone }) => {
+  const toast = useToast();
+  const [edital, setEdital] = useState<Edital | null>(null);
+  const [files, setFiles] = useState<{ [docId: number]: File }>({});
+  const [saving, setSaving] = useState(false);
+
+  useEffect(() => {
+    fetchEditalById(inscricao.edital_id).then(setEdital).catch((err) => toast.error(getErrorMessage(err)));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [inscricao.edital_id]);
+
+  const submit = async () => {
+    if (Object.keys(files).length === 0) return toast.error('Selecione ao menos um arquivo.');
+    setSaving(true);
+    try {
+      await retificarInscricao(inscricao.id, files);
+      toast.success('Documentos substituídos com sucesso.');
+      onDone();
+    } catch (err) {
+      toast.error(getErrorMessage(err));
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <Modal
+      title="Substituir documentos"
+      subtitle={`Inscrição ${inscricao.protocolo} — o protocolo e a data original da inscrição são mantidos.`}
+      onClose={onClose}
+      footer={
+        <>
+          <button onClick={onClose} className={btn.secondary}>Cancelar</button>
+          <button onClick={submit} disabled={saving} className={btn.primary}>
+            {saving && <Loader2 className="h-4 w-4 mr-1.5 animate-spin" />} Enviar
+          </button>
+        </>
+      }
+    >
+      {!edital ? <Spinner /> : (
+        <div className="space-y-3">
+          {(edital.documentos_exigidos || []).map((doc) => {
+            const atual = inscricao.arquivos.find((a) => a.documento_exigido_id === doc.id && a.ativo);
+            return (
+              <div key={doc.id} className="p-3 bg-slate-50 border border-slate-200 rounded-lg">
+                <p className="text-sm font-medium text-slate-800">{doc.nome}</p>
+                <p className="text-xs text-slate-500 mb-2">{atual ? `Atual: ${atual.nome_original} (versão ${atual.versao})` : 'Nenhum arquivo enviado'}</p>
+                <input
+                  type="file"
+                  accept=".pdf,application/pdf"
+                  onChange={(e) => {
+                    const f = e.target.files?.[0];
+                    if (f) setFiles((prev) => ({ ...prev, [doc.id]: f }));
+                  }}
+                  className="block w-full text-xs text-slate-500 file:mr-2 file:py-1 file:px-2.5 file:rounded-md file:border-0 file:bg-blue-50 file:text-blue-700"
+                />
+              </div>
+            );
+          })}
+        </div>
+      )}
+    </Modal>
+  );
+};
+
+export const MyApplicationsPage: React.FC<{ onSelectEdital: (id: number) => void }> = ({ onSelectEdital }) => {
+  const toast = useToast();
+  const [inscricoes, setInscricoes] = useState<InscriptionDetail[]>([]);
   const [loading, setLoading] = useState(true);
-  const [selectedForResource, setSelectedForResource] = useState<InscriptionDetail | null>(null);
+  const [recursoPara, setRecursoPara] = useState<InscriptionDetail | null>(null);
   const [recursoTexto, setRecursoTexto] = useState('');
-  const [submittingResource, setSubmittingResource] = useState(false);
+  const [enviando, setEnviando] = useState(false);
+  const [retificar, setRetificar] = useState<InscriptionDetail | null>(null);
 
   const loadData = async () => {
     setLoading(true);
     try {
-      const data = await fetchMyApplications();
-      setInscricoes(data);
+      setInscricoes(await fetchMyApplications());
     } catch (err) {
-      console.error('Erro ao carregar inscrições', err);
+      toast.error(getErrorMessage(err, 'Não foi possível carregar suas inscrições.'));
     } finally {
       setLoading(false);
     }
@@ -24,187 +104,147 @@ export const MyApplicationsPage: React.FC = () => {
 
   useEffect(() => {
     loadData();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  const handleSendResource = async () => {
-    if (!selectedForResource) return;
-    if (recursoTexto.trim().length < 20) {
-      alert('A argumentação do recurso deve possuir no mínimo 20 caracteres (RN-10).');
-      return;
-    }
-    setSubmittingResource(true);
+  const enviarRecurso = async () => {
+    if (!recursoPara) return;
+    if (recursoTexto.trim().length < 20) return toast.error('Descreva o recurso com pelo menos 20 caracteres.');
+    setEnviando(true);
     try {
-      await apiClient.post(`/inscricoes/${selectedForResource.id}/recursos`, {
-        texto: recursoTexto,
-      });
-      alert('Recurso protocolado com sucesso na seleção!');
-      setSelectedForResource(null);
+      await interporRecurso(recursoPara.id, recursoTexto.trim());
+      toast.success('Recurso enviado. Você será notificado(a) do julgamento.');
+      setRecursoPara(null);
       setRecursoTexto('');
       loadData();
-    } catch (err: any) {
-      alert(err.response?.data?.detail || 'Erro ao submeter recurso.');
+    } catch (err) {
+      toast.error(getErrorMessage(err));
     } finally {
-      setSubmittingResource(false);
+      setEnviando(false);
     }
   };
 
-  const handleDesistir = async (id: number) => {
-    if (!confirm('Deseja realmente registrar a desistência desta candidatura? Esta ação é definitiva (INS-07).')) return;
+  const desistir = async (insc: InscriptionDetail) => {
+    if (!window.confirm(`Confirmar a desistência da inscrição ${insc.protocolo}? Esta ação não pode ser desfeita.`)) return;
     try {
-      await desistirInscricao(id, 'Desistência voluntária pelo estudante.');
-      alert('Inscrição cancelada com sucesso.');
+      await desistirInscricao(insc.id, 'Desistência solicitada pelo estudante.');
+      toast.success('Desistência registrada.');
       loadData();
-    } catch (err: any) {
-      alert(err.response?.data?.detail || 'Não foi possível registrar a desistência.');
-    }
-  };
-
-  const getStatusBadge = (status: string) => {
-    switch (status) {
-      case 'HOMOLOGADA':
-        return <span className="bg-emerald-50 text-emerald-700 border border-emerald-200 px-2.5 py-0.5 rounded-full text-xs font-semibold">Homologada</span>;
-      case 'INDEFERIDA':
-        return <span className="bg-red-50 text-red-700 border border-red-200 px-2.5 py-0.5 rounded-full text-xs font-semibold">Indeferida</span>;
-      case 'PENDENTE_VALIDACAO_VINCULO':
-        return <span className="bg-amber-50 text-amber-700 border border-amber-200 px-2.5 py-0.5 rounded-full text-xs font-semibold">Pendente Vínculo</span>;
-      case 'DESISTENTE':
-        return <span className="bg-slate-100 text-slate-500 border border-slate-200 px-2.5 py-0.5 rounded-full text-xs font-semibold">Desistente</span>;
-      default:
-        return <span className="bg-slate-100 text-slate-700 px-2.5 py-0.5 rounded-full text-xs font-semibold">{status}</span>;
+    } catch (err) {
+      toast.error(getErrorMessage(err));
     }
   };
 
   return (
     <div className="max-w-6xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
-      <div className="mb-8">
-        <h2 className="text-3xl font-bold text-slate-900 tracking-tight">Minhas Candidaturas (QUERO)</h2>
-        <p className="mt-2 text-slate-600 text-sm">
-          Acompanhe em tempo real a situação formal, o comprovante oficial e a interposição de recursos.
-        </p>
-      </div>
+      <PageHeader title="Minhas inscrições" subtitle="Acompanhe a situação das suas candidaturas, baixe comprovantes e interponha recursos." />
 
       {loading ? (
-        <div className="text-center py-16">
-          <div className="animate-spin rounded-full h-10 w-10 border-b-2 border-blue-600 mx-auto"></div>
-          <p className="mt-4 text-slate-500 text-sm">Consultando suas inscrições...</p>
-        </div>
-      ) : inscrições.length === 0 ? (
-        <div className="text-center py-16 bg-white rounded-xl border border-slate-200">
-          <FileText className="h-12 w-12 text-slate-400 mx-auto mb-3" />
-          <h3 className="text-lg font-medium text-slate-900">Você ainda não possui inscrições</h3>
-          <p className="text-sm text-slate-500 mt-1">Navegue pelas oportunidades na Vitrine para se candidatar.</p>
-        </div>
+        <Spinner label="Carregando suas inscrições..." />
+      ) : inscricoes.length === 0 ? (
+        <EmptyState icon={<FileText className="h-12 w-12" />} title="Você ainda não possui inscrições" description="Consulte os editais abertos para se candidatar." />
       ) : (
         <div className="space-y-4">
-          {inscrições.map((insc) => (
-            <div
-              key={insc.id}
-              className="bg-white rounded-xl border border-slate-200 p-6 shadow-sm flex flex-col md:flex-row md:items-center justify-between gap-4"
-            >
-              <div className="space-y-1.5 flex-1">
-                <div className="flex items-center space-x-2">
-                  <span className="font-mono text-xs font-bold text-blue-700 bg-blue-50 px-2 py-0.5 rounded border border-blue-100">
-                    {insc.protocolo}
-                  </span>
-                  {getStatusBadge(insc.status)}
-                </div>
-
-                <h3 className="text-base font-bold text-slate-900">
-                  {insc.titulo_edital || `Edital #${insc.edital_id}`}
-                </h3>
-
-                <div className="flex flex-wrap gap-x-4 gap-y-1 text-xs text-slate-500">
-                  <span>Curso: <strong className="text-slate-700">{insc.curso_congelado}</strong></span>
-                  <span>CR Congelado: <strong className="text-slate-700">{Number(insc.cr_congelado).toFixed(2)}</strong></span>
-                  <span>Submetido em: {new Date(insc.data_submissao_original).toLocaleDateString('pt-BR')}</span>
-                </div>
-
-                {insc.motivos_indeferimento && insc.motivos_indeferimento.length > 0 && (
-                  <div className="mt-2 text-xs text-red-600 bg-red-50 p-2.5 rounded-lg border border-red-100">
-                    <p className="font-semibold">Motivo(s) do indeferimento:</p>
-                    <ul className="list-disc list-inside mt-0.5">
-                      {insc.motivos_indeferimento.map((m, idx) => (
-                        <li key={idx}>{m}</li>
-                      ))}
-                    </ul>
+          {inscricoes.map((insc) => {
+            const statusEdital = insc.status_edital || '';
+            const podeRetificar = statusEdital === 'ABERTO' && insc.status !== 'DESISTENTE';
+            const podeRecorrer = statusEdital === 'EM_RECURSO' && insc.status === 'HOMOLOGADA' && !insc.recurso_status;
+            const podeDesistir = ['ABERTO', 'INSCRICOES_ENCERRADAS', 'EM_AVALIACAO'].includes(statusEdital) && insc.status !== 'DESISTENTE';
+            const av = insc.avaliacao_resumo;
+            return (
+              <div key={insc.id} className="bg-white rounded-xl border border-slate-200 p-6 shadow-sm">
+                <div className="flex flex-col md:flex-row md:items-start justify-between gap-4">
+                  <div className="space-y-2 flex-1">
+                    <div className="flex flex-wrap items-center gap-2">
+                      <span className="font-mono text-xs font-bold text-blue-700 bg-blue-50 px-2 py-0.5 rounded border border-blue-100">{insc.protocolo}</span>
+                      <InscricaoStatusBadge status={insc.status} />
+                      {statusEdital && <EditalStatusBadge status={statusEdital} />}
+                    </div>
+                    <button onClick={() => onSelectEdital(insc.edital_id)} className="text-base font-bold text-slate-900 hover:text-blue-700 flex items-center text-left">
+                      {insc.titulo_edital || `Edital nº ${insc.edital_id}`} <ExternalLink className="h-3.5 w-3.5 ml-1.5 text-slate-400" />
+                    </button>
+                    <div className="flex flex-wrap gap-x-4 gap-y-1 text-xs text-slate-500">
+                      <span>Curso: <strong className="text-slate-700">{insc.curso_congelado || '-'}</strong></span>
+                      <span>CR: <strong className="text-slate-700">{formatNumber(insc.cr_congelado)}</strong></span>
+                      <span>Inscrição em {formatDate(insc.data_submissao_original)}</span>
+                      {insc.data_ultima_retificacao && <span>Última substituição em {formatDate(insc.data_ultima_retificacao)}</span>}
+                    </div>
+                    {av && av.nota_merito !== null && av.nota_merito !== undefined && (
+                      <p className="text-sm text-slate-700">
+                        Nota de mérito: <strong>{formatNumber(av.nota_merito)}</strong>
+                        {av.parecer === 'INDEFERIDO' && <span className="text-red-600 ml-2">(parecer desfavorável)</span>}
+                      </p>
+                    )}
+                    {insc.recurso_status && <p className="text-xs font-medium text-orange-700">{RECURSO_LABEL[insc.recurso_status] || insc.recurso_status}</p>}
+                    {insc.status === 'PENDENTE_VALIDACAO_VINCULO' && (
+                      <p className="text-xs text-amber-700">Aguardando conferência dos documentos pela Pró-Reitoria.</p>
+                    )}
+                    {insc.motivos_indeferimento && insc.motivos_indeferimento.length > 0 && (
+                      <div className="text-xs text-red-700 bg-red-50 p-2.5 rounded-lg border border-red-100">
+                        <p className="font-semibold">Motivo(s):</p>
+                        <ul className="list-disc list-inside mt-0.5">
+                          {insc.motivos_indeferimento.map((m) => <li key={m}>{m}</li>)}
+                        </ul>
+                      </div>
+                    )}
                   </div>
-                )}
+
+                  <div className="flex flex-wrap gap-2 md:justify-end md:max-w-xs">
+                    <button onClick={() => downloadComprovante(insc.id, insc.protocolo).catch((err) => toast.error(getErrorMessage(err)))} className={btn.secondary}>
+                      <Download className="h-4 w-4 mr-1.5" /> Comprovante
+                    </button>
+                    {podeRetificar && (
+                      <button onClick={() => setRetificar(insc)} className={btn.secondary}>
+                        <Upload className="h-4 w-4 mr-1.5" /> Substituir documentos
+                      </button>
+                    )}
+                    {podeRecorrer && (
+                      <button onClick={() => setRecursoPara(insc)} className={btn.primary}>
+                        <CornerUpRight className="h-4 w-4 mr-1.5" /> Interpor recurso
+                      </button>
+                    )}
+                    {podeDesistir && (
+                      <button onClick={() => desistir(insc)} className="inline-flex items-center px-4 py-2 border border-red-200 rounded-lg text-sm font-medium text-red-600 hover:bg-red-50">
+                        <Ban className="h-4 w-4 mr-1.5" /> Desistir
+                      </button>
+                    )}
+                  </div>
+                </div>
               </div>
-
-              <div className="flex flex-wrap items-center gap-2 pt-2 md:pt-0">
-                <button
-                  onClick={() => downloadComprovante(insc.id, insc.protocolo)}
-                  className="px-3 py-1.5 border border-slate-200 rounded-lg text-xs font-medium text-slate-700 hover:bg-slate-50 transition flex items-center"
-                >
-                  <Download className="h-3.5 w-3.5 mr-1 text-slate-500" />
-                  Comprovante
-                </button>
-
-                {insc.status === 'HOMOLOGADA' && (
-                  <button
-                    onClick={() => setSelectedForResource(insc)}
-                    className="px-3 py-1.5 bg-blue-50 border border-blue-200 rounded-lg text-xs font-semibold text-blue-700 hover:bg-blue-100 transition flex items-center"
-                  >
-                    <CornerUpRight className="h-3.5 w-3.5 mr-1" />
-                    Interpor Recurso
-                  </button>
-                )}
-
-                {insc.status !== 'DESISTENTE' && (
-                  <button
-                    onClick={() => handleDesistir(insc.id)}
-                    className="px-3 py-1.5 border border-red-100 rounded-lg text-xs font-medium text-red-600 hover:bg-red-50 transition flex items-center"
-                  >
-                    <Ban className="h-3.5 w-3.5 mr-1" />
-                    Desistir
-                  </button>
-                )}
-              </div>
-            </div>
-          ))}
+            );
+          })}
         </div>
       )}
 
-      {/* Modal Interposição de Recurso */}
-      {selectedForResource && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/60 backdrop-blur-sm p-4">
-          <div className="bg-white rounded-2xl shadow-xl max-w-lg w-full border border-slate-200 p-6">
-            <h3 className="text-lg font-bold text-slate-900 mb-1">Interposição de Recurso (RN-10)</h3>
-            <p className="text-xs text-slate-500 mb-4">
-              Inscrição: {selectedForResource.protocolo} &mdash; Até 5000 caracteres.
-            </p>
-
-            <div className="mb-4">
-              <label className="block text-xs font-semibold text-slate-700 mb-1">
-                Justificativa e Fundamentação Técnica:
-              </label>
-              <textarea
-                rows={5}
-                value={recursoTexto}
-                onChange={(e) => setRecursoTexto(e.target.value)}
-                placeholder="Exponha com clareza as razões do seu pedido de reavaliação..."
-                className="w-full p-3 border border-slate-300 rounded-lg text-xs focus:outline-none focus:ring-2 focus:ring-blue-500"
-              />
-            </div>
-
-            <div className="flex justify-end gap-2">
-              <button
-                onClick={() => setSelectedForResource(null)}
-                className="px-4 py-2 border border-slate-200 rounded-lg text-xs text-slate-700 hover:bg-slate-50"
-              >
-                Cancelar
+      {recursoPara && (
+        <Modal
+          title="Interpor recurso"
+          subtitle={`Inscrição ${recursoPara.protocolo}. É permitido um recurso por candidatura.`}
+          onClose={() => setRecursoPara(null)}
+          footer={
+            <>
+              <button onClick={() => setRecursoPara(null)} className={btn.secondary}>Cancelar</button>
+              <button onClick={enviarRecurso} disabled={enviando} className={btn.primary}>
+                {enviando && <Loader2 className="h-4 w-4 mr-1.5 animate-spin" />} Enviar recurso
               </button>
-              <button
-                onClick={handleSendResource}
-                disabled={submittingResource}
-                className="px-5 py-2 bg-blue-600 text-white rounded-lg text-xs font-semibold hover:bg-blue-700 flex items-center disabled:opacity-50"
-              >
-                {submittingResource && <Loader2 className="h-3.5 w-3.5 mr-1 animate-spin" />}
-                Protocolar Recurso
-              </button>
-            </div>
-          </div>
-        </div>
+            </>
+          }
+        >
+          <label className="block text-xs font-semibold text-slate-700 mb-1">Fundamentação (até 5.000 caracteres)</label>
+          <textarea
+            rows={6}
+            maxLength={5000}
+            value={recursoTexto}
+            onChange={(e) => setRecursoTexto(e.target.value)}
+            placeholder="Explique de forma objetiva os motivos do pedido de revisão."
+            className={inputClass}
+          />
+          <p className="text-xs text-slate-400 text-right mt-1">{recursoTexto.length}/5000</p>
+        </Modal>
+      )}
+
+      {retificar && (
+        <RetificarModal inscricao={retificar} onClose={() => setRetificar(null)} onDone={() => { setRetificar(null); loadData(); }} />
       )}
     </div>
   );

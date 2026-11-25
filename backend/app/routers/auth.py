@@ -1,166 +1,109 @@
-from fastapi import APIRouter, HTTPException, status, Depends, Response
+from fastapi import APIRouter, Depends, HTTPException, Request, status
+from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select
-from app.schemas.auth import LoginRequest, TokenResponse, UserResponse
-from app.core.security import create_access_token, MockAuthProvider, get_current_user
-from app.core.database import get_db
-from app.models.user import Usuario
+
 from app.core.config import settings
+from app.core.database import get_db
+from app.core.security import (
+    create_access_token, get_client_ip, get_current_user, get_password_hash, verify_password,
+)
+from app.models.user import Usuario
+from app.schemas.auth import (
+    AlterarSenhaRequest, CadastroEstudanteRequest, LoginRequest, TokenResponse, UserResponse,
+)
+from app.services.audit_service import log_audit_action
 
 router = APIRouter(prefix="/auth", tags=["Autenticação"])
 
-
-@router.get("/sso/login")
-async def sso_login():
-    """
-    Inicia fluxo OIDC/SAML com SSO institucional (v5.0 §11, TRV-02).
-    Redireciona para o Identity Provider institucional configurado.
-    """
-    return {
-        "status": "iniciando_sso",
-        "redirect_url": "/api/v1/auth/sso/callback?code=mock_sso_authorization_code",
-        "mensagem": "Redirecionando para o Provedor de Identidade Institucional (OIDC/SAML 2.0)"
-    }
+CREDENCIAIS_INVALIDAS = HTTPException(
+    status_code=status.HTTP_401_UNAUTHORIZED,
+    detail="E-mail ou senha incorretos.",
+)
 
 
-@router.get("/sso/callback", response_model=TokenResponse)
-async def sso_callback(
-    code: str = "mock_sso_authorization_code",
-    db: AsyncSession = Depends(get_db)
-):
-    """
-    Conclui autenticação SSO, provisiona usuário como ESTUDANTE caso novo e gera token JWT (TRV-02).
-    """
-    user = MockAuthProvider.authenticate("estudante@faculdade.edu.br")
-    if not user:
-        user = {
-            "id": 1,
-            "nome": "João Silva",
-            "email": "estudante@faculdade.edu.br",
-            "cpf": "11122233344",
-            "matricula": "2024001001",
-            "perfil": "ESTUDANTE",
-            "perfis": ["ESTUDANTE"],
-        }
-    
-    # Garantir existência no banco de dados
-    stmt = select(Usuario).where(Usuario.email == user["email"])
-    res = await db.execute(stmt)
-    user_db = res.scalar_one_or_none()
-    if not user_db:
-        user_db = Usuario(
-            id=user["id"],
-            cpf=user["cpf"],
-            matricula=user.get("matricula"),
-            nome=user["nome"],
-            email=user["email"],
-            perfil=user.get("perfil", "ESTUDANTE"),
-            ativo=True
-        )
-        db.add(user_db)
-        await db.commit()
-        await db.refresh(user_db)
-
-    token_data = {
-        "sub": str(user_db.id),
-        "email": user_db.email,
-        "nome": user_db.nome,
-        "perfil": user_db.perfil,
-        "perfis": user.get("perfis", [user_db.perfil]),
-    }
-    token = create_access_token(data=token_data)
+def _token_response(user: Usuario) -> TokenResponse:
+    token = create_access_token({"sub": str(user.id), "perfil": user.perfil})
     return TokenResponse(
-        access_token=token,
-        token_type="bearer",
-        user_id=user_db.id,
-        nome=user_db.nome,
-        email=user_db.email,
-        perfis=user.get("perfis", [user_db.perfil]),
+        access_token=token, user_id=user.id, nome=user.nome, email=user.email, perfis=[user.perfil],
     )
 
 
 @router.post("/login", response_model=TokenResponse)
-async def login(
-    credentials: LoginRequest,
-    db: AsyncSession = Depends(get_db)
-):
-    """
-    Autenticação de desenvolvimento e contingência local (v5.0 §5 RNF-06).
-    """
-    if settings.USE_MOCK_AUTH:
-        user = MockAuthProvider.authenticate(credentials.email)
-        if not user:
-            # Fallback provisionando como ESTUDANTE
-            clean_email = credentials.email.lower().strip()
-            nome_calc = clean_email.split("@")[0].replace(".", " ").title()
-            user = {
-                "id": 99,
-                "nome": nome_calc,
-                "email": clean_email,
-                "cpf": "99988877766",
-                "matricula": "2024999999",
-                "perfil": "ESTUDANTE",
-                "perfis": ["ESTUDANTE"],
-            }
+async def login(credentials: LoginRequest, request: Request, db: AsyncSession = Depends(get_db)):
+    """Autenticação por e-mail e senha."""
+    email = credentials.email.lower().strip()
+    user = (await db.execute(select(Usuario).where(func.lower(Usuario.email) == email))).scalar_one_or_none()
+    if not user or not verify_password(credentials.senha, user.senha_hash):
+        raise CREDENCIAIS_INVALIDAS
+    if not user.ativo:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Conta desativada. Procure a Pró-Reitoria.")
 
-        # Garantir persistência do usuário na tabela usuarios para integridade referencial
-        stmt = select(Usuario).where(Usuario.email == user["email"])
-        res = await db.execute(stmt)
-        user_db = res.scalar_one_or_none()
-        if not user_db:
-            user_db = Usuario(
-                id=user["id"],
-                cpf=user.get("cpf", "00000000000"),
-                matricula=user.get("matricula"),
-                nome=user["nome"],
-                email=user["email"],
-                perfil=user.get("perfil", "ESTUDANTE"),
-                ativo=True
-            )
-            db.add(user_db)
-            await db.commit()
-            await db.refresh(user_db)
+    await log_audit_action(
+        db=db, usuario_id=user.id, acao="LOGIN", entidade="usuarios", entidade_id=user.id,
+        ip_origem=get_client_ip(request),
+    )
+    await db.commit()
+    return _token_response(user)
 
-        token_data = {
-            "sub": str(user_db.id),
-            "email": user_db.email,
-            "nome": user_db.nome,
-            "perfil": user_db.perfil,
-            "perfis": user.get("perfis", [user_db.perfil]),
-        }
-        token = create_access_token(data=token_data)
-        return TokenResponse(
-            access_token=token,
-            token_type="bearer",
-            user_id=user_db.id,
-            nome=user_db.nome,
-            email=user_db.email,
-            perfis=user.get("perfis", [user_db.perfil]),
+
+@router.post("/cadastro", response_model=TokenResponse, status_code=status.HTTP_201_CREATED)
+async def cadastrar_estudante(data: CadastroEstudanteRequest, request: Request, db: AsyncSession = Depends(get_db)):
+    """Cadastro de estudante (perfil ESTUDANTE)."""
+    if not settings.ALLOW_STUDENT_SIGNUP:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="O cadastro de novos estudantes está desabilitado.")
+
+    email = data.email.lower().strip()
+    conflito = (await db.execute(
+        select(Usuario.id).where(or_(
+            func.lower(Usuario.email) == email, Usuario.cpf == data.cpf, Usuario.matricula == data.matricula,
+        ))
+    )).first()
+    if conflito:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Já existe uma conta com este e-mail, CPF ou matrícula.",
         )
 
-    raise HTTPException(
-        status_code=status.HTTP_501_NOT_IMPLEMENTED,
-        detail="Autenticação direta não configurada; utilize /api/v1/auth/sso/login."
+    user = Usuario(
+        nome=data.nome, email=email, cpf=data.cpf, matricula=data.matricula,
+        senha_hash=get_password_hash(data.senha), perfil="ESTUDANTE", ativo=True,
     )
+    db.add(user)
+    await db.flush()
+    await log_audit_action(
+        db=db, usuario_id=user.id, acao="CADASTRO_ESTUDANTE", entidade="usuarios", entidade_id=user.id,
+        dados_depois={"email": email}, ip_origem=get_client_ip(request),
+    )
+    await db.commit()
+    return _token_response(user)
 
 
 @router.post("/logout")
-async def logout(response: Response, current_user: dict = Depends(get_current_user)):
-    """
-    Revoga sessão e limpa credenciais/cookies HttpOnly (v5.0 §11, RNF-06).
-    """
-    response.delete_cookie(key="refresh_token")
-    return {"status": "sucesso", "mensagem": "Sessão encerrada com sucesso."}
+async def logout(current_user: dict = Depends(get_current_user)):
+    """Encerra a sessão. O token é descartado pelo cliente."""
+    return {"status": "sucesso", "mensagem": "Sessão encerrada."}
 
 
 @router.get("/me", response_model=UserResponse)
 async def get_me(current_user: dict = Depends(get_current_user)):
-    """Retorna dados e perfil do usuário autenticado (v5.0 §11, TRV-02)."""
     return UserResponse(
-        id=current_user["id"],
-        nome=current_user["nome"],
-        email=current_user["email"],
-        matricula=current_user.get("matricula"),
-        cpf=current_user.get("cpf"),
-        perfis=current_user.get("perfis", [current_user.get("perfil", "ESTUDANTE")]),
+        id=current_user["id"], nome=current_user["nome"], email=current_user["email"],
+        matricula=current_user.get("matricula"), perfis=current_user["perfis"],
     )
+
+
+@router.put("/senha")
+async def alterar_senha(
+    data: AlterarSenhaRequest, request: Request,
+    current_user: dict = Depends(get_current_user), db: AsyncSession = Depends(get_db),
+):
+    user = await db.get(Usuario, current_user["id"])
+    if not verify_password(data.senha_atual, user.senha_hash):
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Senha atual incorreta.")
+    user.senha_hash = get_password_hash(data.nova_senha)
+    await log_audit_action(
+        db=db, usuario_id=user.id, acao="ALTERAR_SENHA", entidade="usuarios", entidade_id=user.id,
+        ip_origem=get_client_ip(request),
+    )
+    await db.commit()
+    return {"status": "sucesso", "mensagem": "Senha alterada com sucesso."}

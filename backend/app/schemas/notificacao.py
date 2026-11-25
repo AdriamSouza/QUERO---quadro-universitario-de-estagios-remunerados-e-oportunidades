@@ -1,4 +1,4 @@
-from pydantic import BaseModel
+from pydantic import ConfigDict, BaseModel
 from typing import List
 from datetime import datetime
 
@@ -14,10 +14,10 @@ class NotificacaoResponse(BaseModel):
     tentativas_email: int
     criado_em: datetime
 
-    class Config:
-        from_attributes = True
+    model_config = ConfigDict(from_attributes=True)
 
 
 class NotificacaoListResponse(BaseModel):
     items: List[NotificacaoResponse]
     total: int
+    nao_lidas: int = 0

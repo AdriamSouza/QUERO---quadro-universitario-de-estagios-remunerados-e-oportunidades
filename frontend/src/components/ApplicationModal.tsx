@@ -1,222 +1,172 @@
 import React, { useState } from 'react';
-import { X, Upload, CheckCircle2, AlertCircle, FileText, Loader2, ShieldCheck, Download } from 'lucide-react';
+import { AlertCircle, CheckCircle2, Download, FileText, Loader2 } from 'lucide-react';
 import { Edital } from '../types/edital';
-import { submeterInscricao, downloadComprovante, InscriptionDetail } from '../api/inscricoes';
+import { downloadComprovante, InscriptionDetail, submeterInscricao } from '../api/inscricoes';
+import { getErrorMessage } from '../api/client';
+import { Modal, btn, inputClass, InscricaoStatusBadge } from './ui';
+import { useToast } from './Toast';
+import { formatNumber } from '../utils/format';
 
 interface ApplicationModalProps {
   edital: Edital;
   onClose: () => void;
-  onSuccess: (protocolo: string) => void;
+  onSuccess: (inscricao: InscriptionDetail) => void;
 }
 
+const MAX_BYTES = 10 * 1024 * 1024;
+
 export const ApplicationModal: React.FC<ApplicationModalProps> = ({ edital, onClose, onSuccess }) => {
+  const toast = useToast();
+  const cursos = edital.cursos || [];
+  const docs = edital.documentos_exigidos || [];
   const [selectedFiles, setSelectedFiles] = useState<{ [docId: number]: File }>({});
+  const [cursoCodigo, setCursoCodigo] = useState(cursos.length === 1 ? cursos[0].codigo_curso : '');
+  const [cr, setCr] = useState('');
   const [loading, setLoading] = useState(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
-  const [submittedInscricao, setSubmittedInscricao] = useState<InscriptionDetail | null>(null);
-
-  const docs = edital.documentos_exigidos || [];
+  const [submitted, setSubmitted] = useState<InscriptionDetail | null>(null);
 
   const handleFileChange = (docId: number, e: React.ChangeEvent<HTMLInputElement>) => {
-    if (!e.target.files || !e.target.files[0]) return;
-    const file = e.target.files[0];
-
-    // Validação cliente (RN-04)
+    const file = e.target.files?.[0];
+    if (!file) return;
     if (!file.name.toLowerCase().endsWith('.pdf')) {
-      alert('Arquivo inválido: apenas documentos no formato PDF são aceitos.');
+      toast.error('Envie apenas arquivos em PDF.');
+      e.target.value = '';
       return;
     }
-    if (file.size > 10 * 1024 * 1024) {
-      alert('Arquivo excede o tamanho máximo permitido de 10 MB.');
+    if (file.size > MAX_BYTES) {
+      toast.error('O arquivo excede o limite de 10 MB.');
+      e.target.value = '';
       return;
     }
-
     setSelectedFiles((prev) => ({ ...prev, [docId]: file }));
   };
 
   const handleSubmit = async () => {
-    // Checa se todos os obrigatórios foram preenchidos
-    const docsObrigatorios = docs.filter((d) => d.obrigatorio);
-    for (const d of docsObrigatorios) {
-      if (!selectedFiles[d.id]) {
-        setErrorMessage(`Por favor, anexe o documento obrigatório: ${d.nome}`);
-        return;
-      }
-    }
+    const faltando = docs.filter((d) => d.obrigatorio && !selectedFiles[d.id]);
+    if (faltando.length) return setErrorMessage(`Anexe o documento obrigatório: ${faltando[0].nome}.`);
+    if (!cursoCodigo) return setErrorMessage('Selecione o seu curso.');
+    const crNum = Number(cr.replace(',', '.'));
+    if (!cr || Number.isNaN(crNum) || crNum < 0 || crNum > 10) return setErrorMessage('Informe seu CR (coeficiente de rendimento) entre 0 e 10.');
 
     setLoading(true);
     setErrorMessage(null);
     try {
-      const res = await submeterInscricao(edital.id, selectedFiles);
-      setSubmittedInscricao(res);
-      onSuccess(res.protocolo);
-    } catch (err: any) {
-      setErrorMessage(err.response?.data?.detail || 'Erro ao submeter inscrição.');
+      const res = await submeterInscricao(edital.id, selectedFiles, { curso_codigo: cursoCodigo, cr_declarado: String(crNum) });
+      setSubmitted(res);
+      onSuccess(res);
+    } catch (err) {
+      setErrorMessage(getErrorMessage(err, 'Não foi possível enviar a inscrição.'));
     } finally {
       setLoading(false);
     }
   };
 
-  return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/60 backdrop-blur-sm p-4 overflow-y-auto">
-      <div className="bg-white rounded-2xl shadow-xl max-w-xl w-full border border-slate-200 overflow-hidden my-8">
-        {/* Cabeçalho */}
-        <div className="flex items-center justify-between p-6 border-b border-slate-100 bg-slate-50">
-          <div>
-            <h3 className="text-lg font-bold text-slate-900">Inscrição &mdash; {edital.titulo}</h3>
-            <p className="text-xs text-slate-500 mt-0.5">QUERO &middot; Envio de Documentos e Validação Automática</p>
+  if (submitted) {
+    return (
+      <Modal title="Inscrição registrada" subtitle={edital.titulo} onClose={onClose}
+        footer={
+          <>
+            <button onClick={() => downloadComprovante(submitted.id, submitted.protocolo).catch((err) => toast.error(getErrorMessage(err)))} className={btn.primary}>
+              <Download className="h-4 w-4 mr-1.5" /> Baixar comprovante
+            </button>
+            <button onClick={onClose} className={btn.secondary}>Fechar</button>
+          </>
+        }
+      >
+        <div className="text-center mb-5">
+          <div className="mx-auto h-14 w-14 rounded-full flex items-center justify-center mb-3 bg-emerald-100 text-emerald-600">
+            <CheckCircle2 className="h-8 w-8" />
           </div>
-          <button onClick={onClose} className="text-slate-400 hover:text-slate-600 transition">
-            <X className="h-5 w-5" />
-          </button>
+          <p className="text-sm text-slate-600">Guarde o número de protocolo para acompanhar o processo seletivo.</p>
         </div>
+        <dl className="bg-slate-50 border border-slate-200 rounded-xl p-4 space-y-2 text-sm">
+          <div className="flex justify-between"><dt className="text-slate-500">Protocolo</dt><dd className="font-mono font-bold text-blue-700">{submitted.protocolo}</dd></div>
+          <div className="flex justify-between"><dt className="text-slate-500">Situação</dt><dd><InscricaoStatusBadge status={submitted.status} /></dd></div>
+          <div className="flex justify-between"><dt className="text-slate-500">Curso</dt><dd className="text-slate-800">{submitted.curso_congelado}</dd></div>
+          <div className="flex justify-between"><dt className="text-slate-500">CR</dt><dd className="text-slate-800">{formatNumber(submitted.cr_congelado)}</dd></div>
+        </dl>
+        {submitted.status === 'PENDENTE_VALIDACAO_VINCULO' && (
+          <p className="mt-4 text-xs text-slate-600 bg-amber-50 border border-amber-200 rounded-lg p-3">
+            Sua inscrição será conferida pela Pró-Reitoria com base nos documentos enviados. Você será notificado(a) do resultado da análise.
+          </p>
+        )}
+        {submitted.motivos_indeferimento && submitted.motivos_indeferimento.length > 0 && (
+          <div className="mt-4 bg-red-50 border border-red-200 rounded-xl p-3 text-sm text-red-700">
+            <p className="font-semibold mb-1">Pendências identificadas:</p>
+            <ul className="list-disc list-inside space-y-0.5">
+              {submitted.motivos_indeferimento.map((m) => <li key={m}>{m}</li>)}
+            </ul>
+            <p className="mt-2 text-xs">Enquanto as inscrições estiverem abertas, você pode substituir documentos em "Minhas inscrições".</p>
+          </div>
+        )}
+      </Modal>
+    );
+  }
 
-        {/* Corpo do Modal */}
-        <div className="p-6">
-          {submittedInscricao ? (
-            /* Tela de Conclusão / Protocolo */
-            <div className="text-center py-6">
-              <div className={`mx-auto h-14 w-14 rounded-full flex items-center justify-center mb-4 ${
-                submittedInscricao.status === 'HOMOLOGADA' ? 'bg-emerald-100 text-emerald-600' : 'bg-amber-100 text-amber-600'
-              }`}>
-                <CheckCircle2 className="h-8 w-8" />
-              </div>
+  return (
+    <Modal
+      title="Inscrição"
+      subtitle={edital.titulo}
+      onClose={onClose}
+      size="lg"
+      footer={
+        <>
+          <button onClick={onClose} className={btn.secondary}>Cancelar</button>
+          <button onClick={handleSubmit} disabled={loading} className={btn.primary}>
+            {loading && <Loader2 className="h-4 w-4 mr-1.5 animate-spin" />} Enviar inscrição
+          </button>
+        </>
+      }
+    >
+      {errorMessage && (
+        <div className="mb-4 p-3 bg-red-50 border border-red-200 rounded-lg text-sm text-red-700 flex items-center">
+          <AlertCircle className="h-4 w-4 mr-2 flex-shrink-0" /> {errorMessage}
+        </div>
+      )}
 
-              <h4 className="text-xl font-bold text-slate-900 mb-1">Candidatura Registrada!</h4>
-              <p className="text-xs text-slate-500 mb-6">Guarde o seu protocolo para acompanhamento do processo seletivo.</p>
-
-              <div className="bg-slate-50 border border-slate-200 rounded-xl p-4 mb-6 text-left space-y-2 text-xs">
-                <div className="flex justify-between">
-                  <span className="text-slate-500">Protocolo Único:</span>
-                  <span className="font-mono font-bold text-blue-700 text-sm">{submittedInscricao.protocolo}</span>
-                </div>
-                <div className="flex justify-between">
-                  <span className="text-slate-500">Situação Formal:</span>
-                  <span className={`font-semibold px-2 py-0.5 rounded ${
-                    submittedInscricao.status === 'HOMOLOGADA' ? 'bg-emerald-50 text-emerald-700' : 'bg-red-50 text-red-700'
-                  }`}>
-                    {submittedInscricao.status}
-                  </span>
-                </div>
-                <div className="flex justify-between">
-                  <span className="text-slate-500">Curso Congelado:</span>
-                  <span className="font-medium text-slate-800">{submittedInscricao.curso_congelado}</span>
-                </div>
-                <div className="flex justify-between">
-                  <span className="text-slate-500">CR Congelado:</span>
-                  <span className="font-medium text-slate-800">{Number(submittedInscricao.cr_congelado).toFixed(2)}</span>
-                </div>
-              </div>
-
-              {submittedInscricao.motivos_indeferimento && submittedInscricao.motivos_indeferimento.length > 0 && (
-                <div className="bg-red-50 border border-red-200 rounded-xl p-3 mb-6 text-left text-xs text-red-700">
-                  <p className="font-semibold mb-1">Pendências apontadas na validação automática:</p>
-                  <ul className="list-disc list-inside space-y-0.5">
-                    {submittedInscricao.motivos_indeferimento.map((m, idx) => (
-                      <li key={idx}>{m}</li>
-                    ))}
-                  </ul>
-                </div>
-              )}
-
-              <div className="flex flex-col sm:flex-row gap-3 justify-center">
-                <button
-                  onClick={() => downloadComprovante(submittedInscricao.id, submittedInscricao.protocolo)}
-                  className="px-4 py-2 bg-blue-600 text-white rounded-lg text-xs font-semibold flex items-center justify-center hover:bg-blue-700 transition"
-                >
-                  <Download className="h-4 w-4 mr-1.5" />
-                  Baixar Comprovante (PDF)
-                </button>
-                <button
-                  onClick={onClose}
-                  className="px-4 py-2 bg-slate-100 text-slate-700 rounded-lg text-xs font-semibold hover:bg-slate-200 transition"
-                >
-                  Fechar
-                </button>
-              </div>
-            </div>
-          ) : (
-            /* Formulário de Upload dos Documentos */
-            <div>
-              {errorMessage && (
-                <div className="mb-4 p-3 bg-red-50 border border-red-200 rounded-lg text-xs text-red-700 flex items-center">
-                  <AlertCircle className="h-4 w-4 mr-2 flex-shrink-0" />
-                  {errorMessage}
-                </div>
-              )}
-
-              <p className="text-xs text-slate-600 mb-4">
-                Envie os documentos exigidos em formato PDF (máx. 10 MB por arquivo).
-                Seus dados acadêmicos (vínculo, curso e CR) serão validados e congelados automaticamente na submissão (RN-02).
-              </p>
-
-              <div className="space-y-4 mb-6">
-                {docs.length === 0 ? (
-                  <p className="text-xs text-slate-500 italic">Nenhum documento cadastrado neste edital.</p>
-                ) : (
-                  docs.map((doc) => {
-                    const file = selectedFiles[doc.id];
-                    return (
-                      <div key={doc.id} className="p-3 bg-slate-50 rounded-lg border border-slate-200">
-                        <div className="flex items-center justify-between mb-1.5">
-                          <label className="text-xs font-semibold text-slate-800 flex items-center">
-                            <FileText className="h-4 w-4 mr-1.5 text-blue-600" />
-                            {doc.nome}
-                            {doc.obrigatorio && <span className="text-red-500 ml-1">*</span>}
-                          </label>
-                          {file && (
-                            <span className="text-[11px] text-emerald-600 font-medium flex items-center">
-                              <CheckCircle2 className="h-3.5 w-3.5 mr-1" />
-                              Selecionado
-                            </span>
-                          )}
-                        </div>
-
-                        {doc.descricao && (
-                          <p className="text-[11px] text-slate-500 mb-2">{doc.descricao}</p>
-                        )}
-
-                        <div className="flex items-center gap-2">
-                          <input
-                            type="file"
-                            accept=".pdf,application/pdf"
-                            onChange={(e) => handleFileChange(doc.id, e)}
-                            className="block w-full text-xs text-slate-500
-                              file:mr-2 file:py-1 file:px-2.5
-                              file:rounded-md file:border-0
-                              file:text-xs file:font-medium
-                              file:bg-blue-50 file:text-blue-700
-                              hover:file:bg-blue-100"
-                          />
-                        </div>
-                      </div>
-                    );
-                  })
-                )}
-              </div>
-
-              <div className="flex justify-end gap-3 border-t border-slate-100 pt-4">
-                <button
-                  type="button"
-                  onClick={onClose}
-                  className="px-4 py-2 border border-slate-200 rounded-lg text-xs font-medium text-slate-700 hover:bg-slate-50 transition"
-                >
-                  Cancelar
-                </button>
-                <button
-                  type="button"
-                  onClick={handleSubmit}
-                  disabled={loading}
-                  className="px-5 py-2 bg-blue-600 text-white rounded-lg text-xs font-semibold hover:bg-blue-700 transition flex items-center disabled:opacity-50"
-                >
-                  {loading && <Loader2 className="h-4 w-4 mr-1.5 animate-spin" />}
-                  Confirmar e Submeter Inscrição
-                </button>
-              </div>
-            </div>
-          )}
+      <h4 className="text-sm font-semibold text-slate-800 mb-2">Dados acadêmicos</h4>
+      <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 mb-2">
+        <div className="sm:col-span-2">
+          <label className="block text-xs text-slate-600 mb-1">Curso</label>
+          <select value={cursoCodigo} onChange={(e) => setCursoCodigo(e.target.value)} className={inputClass}>
+            <option value="">Selecione</option>
+            {cursos.map((c) => <option key={c.codigo_curso} value={c.codigo_curso}>{c.nome_curso}</option>)}
+          </select>
+        </div>
+        <div>
+          <label className="block text-xs text-slate-600 mb-1">CR acumulado</label>
+          <input inputMode="decimal" placeholder="Ex.: 8,25" value={cr} onChange={(e) => setCr(e.target.value)} className={inputClass} />
         </div>
       </div>
-    </div>
+      <p className="text-xs text-slate-500 mb-5">
+        As informações serão conferidas com o histórico escolar enviado. Declarações inconsistentes levam ao indeferimento.
+      </p>
+
+      <h4 className="text-sm font-semibold text-slate-800 mb-2">Documentos (PDF, até 10 MB)</h4>
+      <div className="space-y-3">
+        {docs.map((doc) => (
+          <div key={doc.id} className="p-3 bg-slate-50 rounded-lg border border-slate-200">
+            <div className="flex items-center justify-between mb-1.5">
+              <label className="text-sm font-medium text-slate-800 flex items-center">
+                <FileText className="h-4 w-4 mr-1.5 text-blue-600" />
+                {doc.nome}
+                {doc.obrigatorio ? <span className="text-red-500 ml-1">*</span> : <span className="text-slate-400 ml-1 text-xs">(opcional)</span>}
+              </label>
+              {selectedFiles[doc.id] && (
+                <span className="text-xs text-emerald-600 font-medium flex items-center"><CheckCircle2 className="h-3.5 w-3.5 mr-1" />Anexado</span>
+              )}
+            </div>
+            {doc.descricao && <p className="text-xs text-slate-500 mb-2">{doc.descricao}</p>}
+            <input
+              type="file"
+              accept=".pdf,application/pdf"
+              onChange={(e) => handleFileChange(doc.id, e)}
+              className="block w-full text-xs text-slate-500 file:mr-2 file:py-1 file:px-2.5 file:rounded-md file:border-0 file:text-xs file:font-medium file:bg-blue-50 file:text-blue-700 hover:file:bg-blue-100"
+            />
+          </div>
+        ))}
+      </div>
+    </Modal>
   );
 };

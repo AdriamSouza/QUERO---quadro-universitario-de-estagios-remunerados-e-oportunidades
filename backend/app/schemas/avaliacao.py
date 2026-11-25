@@ -1,4 +1,4 @@
-from pydantic import BaseModel, Field, field_validator
+from pydantic import ConfigDict, BaseModel, Field, field_validator
 from typing import Optional
 from datetime import datetime
 from decimal import Decimal
@@ -24,7 +24,7 @@ class AvaliacaoInput(BaseModel):
     def validate_justificativa(cls, v, values):
         parecer = values.data.get("parecer")
         if parecer == "INDEFERIDO" and (not v or len(v.strip()) < 15):
-            raise ValueError("Justificativa técnica obrigatória com pelo menos 15 caracteres para parecer INDEFERIDO (RN-08).")
+            raise ValueError("Justifique o parecer desfavorável com pelo menos 15 caracteres.")
         return v
 
 
@@ -40,5 +40,4 @@ class AvaliacaoResponse(BaseModel):
     justificativa_retificacao: Optional[str] = None
     atualizado_em: datetime
 
-    class Config:
-        from_attributes = True
+    model_config = ConfigDict(from_attributes=True)

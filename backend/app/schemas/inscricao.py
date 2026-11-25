@@ -1,4 +1,4 @@
-from pydantic import BaseModel, Field
+from pydantic import ConfigDict, BaseModel, Field
 from typing import List, Optional, Any
 from datetime import datetime
 from decimal import Decimal
@@ -18,8 +18,14 @@ class ArquivoResponse(BaseModel):
     status_varredura: str
     enviado_em: datetime
 
-    class Config:
-        from_attributes = True
+    model_config = ConfigDict(from_attributes=True)
+
+
+class AvaliacaoResumo(BaseModel):
+    status: str
+    parecer: Optional[str] = None
+    nota_merito: Optional[Decimal] = None
+    avaliador_id: int
 
 
 class InscricaoResponse(BaseModel):
@@ -39,10 +45,13 @@ class InscricaoResponse(BaseModel):
     arquivos: List[ArquivoResponse] = []
     nome_estudante: Optional[str] = None
     email_estudante: Optional[str] = None
+    matricula_estudante: Optional[str] = None
     titulo_edital: Optional[str] = None
+    status_edital: Optional[str] = None
+    avaliacao_resumo: Optional[AvaliacaoResumo] = None
+    recurso_status: Optional[str] = None
 
-    class Config:
-        from_attributes = True
+    model_config = ConfigDict(from_attributes=True)
 
 
 class InscricaoListResponse(BaseModel):

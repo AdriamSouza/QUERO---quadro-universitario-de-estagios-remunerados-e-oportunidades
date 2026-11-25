@@ -1,4 +1,4 @@
-from pydantic import BaseModel, Field
+from pydantic import ConfigDict, BaseModel, Field
 from typing import List, Optional
 from datetime import datetime
 from decimal import Decimal
@@ -19,6 +19,9 @@ class ClassificacaoItem(BaseModel):
 class ResultadoPreliminarResponse(BaseModel):
     edital_id: int
     titulo: str
+    status_edital: Optional[str] = None
+    publicado_em: Optional[datetime] = None
+    prazo_recurso_ate: Optional[datetime] = None
     total_homologadas: int
     total_deferidas: int
     total_indeferidas: int
@@ -46,5 +49,4 @@ class AtaHomologacaoResponse(BaseModel):
     justificativa_retificacao: Optional[str] = None
     homologado_em: datetime
 
-    class Config:
-        from_attributes = True
+    model_config = ConfigDict(from_attributes=True)

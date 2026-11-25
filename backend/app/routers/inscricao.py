@@ -1,229 +1,144 @@
-from fastapi import APIRouter, Depends, Request, Response, UploadFile, File, Form, HTTPException, status
-from sqlalchemy.ext.asyncio import AsyncSession
-from typing import Optional, List, Dict
-import io
+from typing import List
 
-from app.core.database import get_db
-from app.core.security import require_roles, get_current_user
-from app.schemas.inscricao import (
-    InscricaoResponse, InscricaoListResponse,
-    InscricaoReanalisarRequest, InscricaoDesistirRequest
-)
+from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.core.security import get_client_ip, get_current_user, require_roles
+from app.routers._upload import extrair_documentos, ler_formulario
 from app.schemas.avaliacao import AvaliacaoInput, AvaliacaoResponse
+from app.schemas.inscricao import InscricaoDesistirRequest, InscricaoReanalisarRequest, InscricaoResponse
 from app.schemas.recurso import RecursoCreate, RecursoResponse
+from app.services.avaliacao_service import FASES_RESULTADO_PUBLICO, AvaliacaoService
+from app.services.edital_service import EditalService
 from app.services.inscricao_service import InscricaoService
-from app.services.avaliacao_service import AvaliacaoService
+from app.services.report_service import ReportService
+from app.services.workflow_service import STATUS_INSCRICAO_LABEL, get_db_sincronizado
 
 router = APIRouter(prefix="/inscricoes", tags=["Inscrições"])
+
+
+def _visao_estudante(inscricao) -> InscricaoResponse:
+    """O estudante só vê a própria nota após a publicação do resultado preliminar."""
+    resp = InscricaoResponse.model_validate(inscricao)
+    if resp.status_edital not in FASES_RESULTADO_PUBLICO:
+        resp.avaliacao_resumo = None
+    return resp
+
+
+async def _autorizar_leitura(db: AsyncSession, inscricao, user: dict) -> None:
+    """Titular, Pró-Reitoria ou avaliador designado na comissão do edital (RN-15)."""
+    if inscricao.estudante_id == user["id"] or "PRO_REITOR" in user["perfis"]:
+        return
+    if "AVALIADOR" in user["perfis"] and await EditalService.usuario_na_comissao(db, inscricao.edital_id, user["id"]):
+        return
+    raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Acesso restrito ao titular e à comissão avaliadora.")
 
 
 @router.get("/me", response_model=List[InscricaoResponse])
 async def listar_minhas_inscricoes(
     current_user: dict = Depends(require_roles(["ESTUDANTE"])),
-    db: AsyncSession = Depends(get_db)
+    db: AsyncSession = Depends(get_db_sincronizado),
 ):
-    """
-    Lista inscrições, status e resultados do estudante logado (v5.0 §11, INS-06).
-    """
-    return await InscricaoService.listar_minhas_inscricoes(
-        db=db,
-        estudante_id=current_user["id"]
-    )
+    inscricoes = await InscricaoService.listar_minhas_inscricoes(db, current_user["id"])
+    return [_visao_estudante(i) for i in inscricoes]
 
 
 @router.get("/{id}", response_model=InscricaoResponse)
 async def get_inscricao(
     id: int,
     current_user: dict = Depends(get_current_user),
-    db: AsyncSession = Depends(get_db)
+    db: AsyncSession = Depends(get_db_sincronizado),
 ):
-    """Retorna detalhes da inscrição com verificação de autorização."""
     inscricao = await InscricaoService.get_inscricao_by_id(db, id)
-    # Permite acesso ao titular, avaliador ou pró-reitor (RN-15)
-    user_roles = current_user.get("perfis", [current_user.get("perfil")])
-    if "PRO_REITOR" not in user_roles and "AVALIADOR" not in user_roles and inscricao.estudante_id != current_user["id"]:
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Acesso restrito ao titular ou comissão avaliadora (RN-15).")
+    await _autorizar_leitura(db, inscricao, current_user)
+    if inscricao.estudante_id == current_user["id"]:
+        return _visao_estudante(inscricao)
     return inscricao
 
 
 @router.put("/{id}/retificar", response_model=InscricaoResponse)
 async def retificar_inscricao(
-    id: int,
-    request: Request,
+    id: int, request: Request,
     current_user: dict = Depends(require_roles(["ESTUDANTE"])),
-    db: AsyncSession = Depends(get_db)
+    db: AsyncSession = Depends(get_db_sincronizado),
 ):
-    """
-    Substitui PDFs no prazo regulamentar mantendo protocolo e CR congelado (v5.0 §11, INS-05, RN-02).
-    """
-    client_ip = request.client.host if request.client else "127.0.0.1"
-    form = await request.form()
-    arquivos_dict: Dict[int, UploadFile] = {}
-
-    for key, value in form.items():
-        if isinstance(value, UploadFile):
-            num_part = "".join(filter(str.isdigit, key))
-            if num_part:
-                arquivos_dict[int(num_part)] = value
-
-    if not arquivos_dict:
-        raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-            detail="Nenhum arquivo enviado para retificação. Indique os arquivos nos campos 'doc_{id}'."
-        )
-
-    return await InscricaoService.retificar_inscricao(
-        db=db,
-        inscricao_id=id,
-        estudante_id=current_user["id"],
-        arquivos_retificados=arquivos_dict,
-        ip_origem=client_ip
-    )
+    """Substitui PDFs dentro do prazo de inscrição, mantendo protocolo e dados congelados (INS-05)."""
+    form = await ler_formulario(request)
+    arquivos = extrair_documentos(form)
+    inscricao = await InscricaoService.retificar_inscricao(db, id, current_user["id"], arquivos, get_client_ip(request))
+    return _visao_estudante(inscricao)
 
 
 @router.post("/{id}/desistir", response_model=InscricaoResponse)
 async def desistir_inscricao(
-    id: int,
-    data: InscricaoDesistirRequest,
-    request: Request,
+    id: int, data: InscricaoDesistirRequest, request: Request,
     current_user: dict = Depends(require_roles(["ESTUDANTE"])),
-    db: AsyncSession = Depends(get_db)
+    db: AsyncSession = Depends(get_db_sincronizado),
 ):
-    """
-    Marca inscrição como Desistente antes da publicação do resultado preliminar (v5.0 §11, INS-07).
-    """
-    client_ip = request.client.host if request.client else "127.0.0.1"
-    return await InscricaoService.desistir_inscricao(
-        db=db,
-        inscricao_id=id,
-        estudante_id=current_user["id"],
-        data=data,
-        ip_origem=client_ip
-    )
+    inscricao = await InscricaoService.desistir_inscricao(db, id, current_user["id"], data, get_client_ip(request))
+    return _visao_estudante(inscricao)
 
 
 @router.get("/{id}/comprovante")
 async def baixar_comprovante_inscricao(
     id: int,
     current_user: dict = Depends(get_current_user),
-    db: AsyncSession = Depends(get_db)
+    db: AsyncSession = Depends(get_db_sincronizado),
 ):
-    """
-    Emite e baixa comprovante digital de inscrição com protocolo único em formato PDF (v5.0 §11, INS-04).
-    """
+    """Comprovante de inscrição em PDF (INS-04)."""
     inscricao = await InscricaoService.get_inscricao_by_id(db, id)
-    user_roles = current_user.get("perfis", [current_user.get("perfil")])
-    if "PRO_REITOR" not in user_roles and inscricao.estudante_id != current_user["id"]:
+    if "PRO_REITOR" not in current_user["perfis"] and inscricao.estudante_id != current_user["id"]:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Acesso restrito ao titular da inscrição.")
 
-    data_subm = inscricao.data_submissao_original.strftime("%d/%m/%Y às %H:%M:%S")
-    corpo = f"""
-================================================================================
-     QUERO - QUADRO UNIVERSITÁRIO DE ESTÁGIOS REMUNERADOS E OPORTUNIDADES
-================================================================================
-                    COMPROVANTE OFICIAL DE INSCRIÇÃO
---------------------------------------------------------------------------------
-Protocolo Único: {inscricao.protocolo}
-Edital: {inscricao.edital.titulo} (ID: {inscricao.edital_id})
-Candidato: {inscricao.estudante.nome}
-Matrícula: {inscricao.estudante.matricula or "N/A"}
-Curso Congelado: {inscricao.curso_congelado}
-CR Congelado: {float(inscricao.cr_congelado or 0.0):.2f}
-Data/Hora Oficial: {data_subm} (Horário de Brasília)
-Situação Formal: {inscricao.status}
---------------------------------------------------------------------------------
-Documento emitido eletronicamente pela plataforma QUERO.
-Autenticidade garantida pelo identificador de protocolo unificado.
-================================================================================
-"""
-    stream_content = f"BT /F1 10 Tf 36 760 Td 14 TL\n"
-    for linha in corpo.encode("latin-1", errors="replace").decode("latin-1").split("\n"):
-        stream_content += f"({linha}) '\n"
-    stream_content += "ET"
-    stream_bytes = stream_content.encode("latin-1", errors="replace")
-
-    header_bytes = b"%PDF-1.4\n%\xe2\xe3\xcf\xd3\n"
-    stream_obj = (
-        f"1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n"
-        f"2 0 obj\n<< /Type /Pages /Kids [3 0 R] /Count 1 >>\nendobj\n"
-        f"3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] /Resources << /Font << /F1 4 0 R >> >> /Contents 5 0 R >>\nendobj\n"
-        f"4 0 obj\n<< /Type /Font /Subtype /Type1 /BaseFont /Courier >>\nendobj\n"
-        f"5 0 obj\n<< /Length {len(stream_bytes)} >>\nstream\n"
-    ).encode("ascii") + stream_bytes + b"\nendstream\nendobj\n"
-
-    trailer_bytes = (
-        f"xref\n0 6\n0000000000 65535 f \n"
-        f"trailer\n<< /Size 6 /Root 1 0 R >>\nstartxref\n{len(header_bytes) + len(stream_obj)}\n%%EOF"
-    ).encode("ascii")
-
-    pdf_output = header_bytes + stream_obj + trailer_bytes
-
+    nomes_docs = {d.id: d.nome for d in inscricao.edital.documentos_exigidos}
+    documentos = [
+        f"{nomes_docs.get(a.documento_exigido_id, 'Documento')}: {a.nome_original} (versão {a.versao})"
+        for a in sorted(inscricao.arquivos, key=lambda a: (a.documento_exigido_id or 0, a.versao))
+        if a.ativo
+    ]
+    pdf = ReportService.gerar_comprovante_inscricao_pdf(
+        protocolo=inscricao.protocolo,
+        edital_id=inscricao.edital_id,
+        edital_titulo=inscricao.edital.titulo,
+        nome=inscricao.estudante.nome,
+        matricula=inscricao.estudante.matricula,
+        curso=inscricao.curso_congelado,
+        cr=inscricao.cr_congelado,
+        data_submissao=inscricao.data_submissao_original,
+        data_retificacao=inscricao.data_ultima_retificacao,
+        situacao=STATUS_INSCRICAO_LABEL.get(inscricao.status, inscricao.status),
+        documentos=documentos,
+    )
     return Response(
-        content=pdf_output,
+        content=pdf,
         media_type="application/pdf",
-        headers={"Content-Disposition": f'attachment; filename="comprovante_{inscricao.protocolo}.pdf"'}
+        headers={"Content-Disposition": f'attachment; filename="comprovante_{inscricao.protocolo}.pdf"'},
     )
 
 
 @router.post("/{id}/reanalisar", response_model=InscricaoResponse)
 async def reanalisar_inscricao(
-    id: int,
-    data: InscricaoReanalisarRequest,
-    request: Request,
+    id: int, data: InscricaoReanalisarRequest, request: Request,
     current_user: dict = Depends(require_roles(["PRO_REITOR"])),
-    db: AsyncSession = Depends(get_db)
+    db: AsyncSession = Depends(get_db_sincronizado),
 ):
-    """
-    Reanálise manual de indeferimento até o início da avaliação (v5.0 §11, RN-05, RN-14).
-    Apenas PRO_REITOR.
-    """
-    client_ip = request.client.host if request.client else "127.0.0.1"
-    return await InscricaoService.reanalisar_inscricao(
-        db=db,
-        inscricao_id=id,
-        data=data,
-        user_id=current_user["id"],
-        ip_origem=client_ip
-    )
+    """Análise manual de inscrições pendentes ou indeferidas, antes da avaliação (RN-05)."""
+    return await InscricaoService.reanalisar_inscricao(db, id, data, current_user["id"], get_client_ip(request))
 
 
 @router.put("/{id}/avaliacao", response_model=AvaliacaoResponse)
 async def avaliar_candidatura(
-    id: int,
-    data: AvaliacaoInput,
-    request: Request,
+    id: int, data: AvaliacaoInput, request: Request,
     current_user: dict = Depends(require_roles(["AVALIADOR", "PRO_REITOR"])),
-    db: AsyncSession = Depends(get_db)
+    db: AsyncSession = Depends(get_db_sincronizado),
 ):
-    """
-    Salva rascunho ou confirma avaliação com nota, parecer e declaração (v5.0 §11, AVA-01, RN-07, RN-08).
-    """
-    client_ip = request.client.host if request.client else "127.0.0.1"
-    return await AvaliacaoService.avaliar_inscricao(
-        db=db,
-        inscricao_id=id,
-        avaliador_id=current_user["id"],
-        data=data,
-        ip_origem=client_ip
-    )
+    return await AvaliacaoService.avaliar_inscricao(db, id, current_user["id"], data, get_client_ip(request))
 
 
 @router.post("/{id}/recursos", response_model=RecursoResponse, status_code=status.HTTP_201_CREATED)
 async def interpor_recurso(
-    id: int,
-    data: RecursoCreate,
-    request: Request,
+    id: int, data: RecursoCreate, request: Request,
     current_user: dict = Depends(require_roles(["ESTUDANTE"])),
-    db: AsyncSession = Depends(get_db)
+    db: AsyncSession = Depends(get_db_sincronizado),
 ):
-    """
-    Interpõe recurso único na janela do edital (v5.0 §11, AVA-03, RN-10).
-    """
-    client_ip = request.client.host if request.client else "127.0.0.1"
-    return await AvaliacaoService.interpor_recurso(
-        db=db,
-        inscricao_id=id,
-        estudante_id=current_user["id"],
-        data=data,
-        ip_origem=client_ip
-    )
+    return await AvaliacaoService.interpor_recurso(db, id, current_user["id"], data, get_client_ip(request))

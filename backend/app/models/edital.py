@@ -4,7 +4,7 @@ from sqlalchemy import (
 )
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import relationship
-from app.models.base import Base
+from app.models.base import Base, loaded_relationship
 
 
 class Edital(Base):
@@ -31,6 +31,7 @@ class Edital(Base):
     data_homologacao_final = Column(TIMESTAMP(timezone=True), nullable=False)
 
     justificativa_cancelamento = Column(Text, nullable=True)
+    data_publicacao_preliminar = Column(TIMESTAMP(timezone=True), nullable=True)
     criado_por = Column(Integer, ForeignKey("usuarios.id"), nullable=False)
     criado_em = Column(TIMESTAMP(timezone=True), nullable=False, server_default=func.now())
 
@@ -86,3 +87,13 @@ class ComissaoEdital(Base):
     edital = relationship("Edital", back_populates="comissao")
     avaliador = relationship("Usuario", foreign_keys=[avaliador_id])
     designador = relationship("Usuario", foreign_keys=[designado_por])
+
+    @property
+    def avaliador_nome(self):
+        av = loaded_relationship(self, "avaliador")
+        return av.nome if av else None
+
+    @property
+    def avaliador_email(self):
+        av = loaded_relationship(self, "avaliador")
+        return av.email if av else None

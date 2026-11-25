@@ -1,46 +1,36 @@
-import os
-from fastapi import APIRouter, Depends, status
-from sqlalchemy.ext.asyncio import AsyncSession
+import logging
+
+from fastapi import APIRouter, Depends, Response, status
 from sqlalchemy import text
-from app.core.database import get_db
+from sqlalchemy.ext.asyncio import AsyncSession
+
 from app.core.config import settings
+from app.core.database import get_db
+from app.core.storage import get_storage_service
 from app.schemas.health import HealthResponse
 
 router = APIRouter(tags=["Health"])
+logger = logging.getLogger(__name__)
 
 
-@router.get("/health", response_model=HealthResponse, status_code=status.HTTP_200_OK)
-async def check_health(db: AsyncSession = Depends(get_db)):
-    """
-    Verificação de integridade operacional do backend, conexão com PostgreSQL
-    e disponibilidade do volume de armazenamento local.
-    """
+@router.get("/health", response_model=HealthResponse)
+async def check_health(response: Response, db: AsyncSession = Depends(get_db)):
+    """Verificação de saúde do backend, do banco de dados e do armazenamento."""
     db_status = "healthy"
     try:
         await db.execute(text("SELECT 1"))
-    except Exception as e:
-        db_status = f"unhealthy: {str(e)}"
+    except Exception:
+        logger.exception("Healthcheck: falha no banco de dados")
+        db_status = "unhealthy"
 
-    storage_status = "healthy"
-    try:
-        if not os.path.exists(settings.STORAGE_PATH):
-            os.makedirs(settings.STORAGE_PATH, exist_ok=True)
-        # Teste de escrita temporária
-        test_file = os.path.join(settings.STORAGE_PATH, ".healthcheck")
-        with open(test_file, "w") as f:
-            f.write("ok")
-        os.remove(test_file)
-    except Exception as e:
-        storage_status = f"unhealthy: {str(e)}"
-
-    overall_status = "healthy" if db_status == "healthy" and storage_status == "healthy" else "degraded"
+    storage_status = "healthy" if await get_storage_service().healthcheck() else "unhealthy"
+    overall = "healthy" if db_status == "healthy" and storage_status == "healthy" else "degraded"
+    if overall != "healthy":
+        response.status_code = status.HTTP_503_SERVICE_UNAVAILABLE
 
     return HealthResponse(
-        status=overall_status,
+        status=overall,
         database=db_status,
         storage=storage_status,
-        details={
-            "environment": settings.ENVIRONMENT,
-            "project": settings.PROJECT_NAME
-        }
+        details={"environment": settings.ENVIRONMENT, "storage_backend": settings.STORAGE_BACKEND},
     )

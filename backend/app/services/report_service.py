@@ -1,8 +1,35 @@
+import csv
 import io
-import hashlib
-from datetime import datetime
-from typing import List, Dict, Any
+from datetime import datetime, timezone
 from decimal import Decimal
+from typing import List, Dict, Any, Optional
+from zoneinfo import ZoneInfo
+
+from app.core.config import settings
+from app.core.pdf import build_text_pdf
+
+SEPARADOR = "=" * 88
+LINHA = "-" * 88
+CABECALHO = "QUERO - QUADRO UNIVERSITÁRIO DE ESTÁGIOS REMUNERADOS E OPORTUNIDADES"
+
+
+def _local(dt: Optional[datetime] = None) -> datetime:
+    dt = dt or datetime.now(timezone.utc)
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(ZoneInfo(settings.TIMEZONE))
+
+
+def _fmt(dt: Optional[datetime] = None) -> str:
+    return _local(dt).strftime("%d/%m/%Y às %H:%M:%S")
+
+
+def _csv_safe(value: Any) -> str:
+    """Neutraliza injeção de fórmulas em planilhas (CSV injection)."""
+    s = "" if value is None else str(value)
+    if s and s[0] in ("=", "+", "-", "@", "\t", "\r"):
+        return "'" + s
+    return s
 
 
 class ReportService:
@@ -16,33 +43,36 @@ class ReportService:
         titulares: List[Dict[str, Any]],
         suplentes: List[Dict[str, Any]]
     ) -> str:
-        """
-        Gera o arquivo CSV oficial dos resultados homologados (HOM-02, v5.0 §10).
-        Utiliza delimitador ';' e cabeçalho UTF-8.
-        """
-        lines = [
-            f"# QUERO - QUADRO UNIVERSITÁRIO DE ESTÁGIOS REMUNERADOS E OPORTUNIDADES",
-            f"# Edital #{edital_id}: {edital_titulo} - Emissão: {datetime.now().strftime('%d/%m/%Y %H:%M:%S')}",
-            "Posicao;Situacao;Protocolo;Nome;Matricula;Curso;CR;NotaMerito;ValorMensal_Bolsa;CargaHorariaSemanal"
-        ]
+        """Lista oficial de contemplados e suplentes em CSV (separador ';', compatível com Excel)."""
+        buffer = io.StringIO()
+        writer = csv.writer(buffer, delimiter=";", quoting=csv.QUOTE_MINIMAL, lineterminator="\r\n")
+        writer.writerow([f"# {CABECALHO}"])
+        writer.writerow([f"# Edital #{edital_id}: {_csv_safe(edital_titulo)} - Emissão: {_local().strftime('%d/%m/%Y %H:%M:%S')}"])
+        writer.writerow([
+            "Posicao", "Situacao", "Protocolo", "Nome", "Matricula", "Curso",
+            "CR", "NotaMerito", "ValorMensal_Bolsa", "CargaHorariaSemanal",
+        ])
+
+        def _row(item: Dict[str, Any], situacao: str, valor: Decimal):
+            writer.writerow([
+                item["posicao"],
+                situacao,
+                _csv_safe(item["protocolo"]),
+                _csv_safe(item["nome_estudante"]),
+                _csv_safe(item.get("matricula") or "-"),
+                _csv_safe(item.get("curso") or ""),
+                f"{float(item.get('cr') or 0):.2f}",
+                f"{float(item.get('nota_merito') or 0):.2f}",
+                f"{float(valor):.2f}",
+                f"{carga_horaria}h",
+            ])
 
         for item in titulares:
-            matricula = item.get("matricula") or "-"
-            cr = float(item.get("cr", 0.0))
-            nota = float(item.get("nota_merito", 0.0))
-            lines.append(
-                f"{item['posicao']};CONTEMPLADO;{item['protocolo']};{item['nome_estudante']};{matricula};{item['curso']};{cr:.2f};{nota:.2f};{float(valor_bolsa):.2f};{carga_horaria}h"
-            )
-
+            _row(item, "CONTEMPLADO", valor_bolsa)
         for item in suplentes:
-            matricula = item.get("matricula") or "-"
-            cr = float(item.get("cr", 0.0))
-            nota = float(item.get("nota_merito", 0.0))
-            lines.append(
-                f"{item['posicao']};SUPLENTE;{item['protocolo']};{item['nome_estudante']};{matricula};{item['curso']};{cr:.2f};{nota:.2f};0.00;{carga_horaria}h"
-            )
+            _row(item, "SUPLENTE", Decimal("0"))
 
-        return "\r\n".join(lines)
+        return buffer.getvalue()
 
     @staticmethod
     def gerar_ata_homologacao_pdf(
@@ -54,80 +84,87 @@ class ReportService:
         suplentes: List[Dict[str, Any]],
         despacho: str
     ) -> bytes:
-        """
-        Gera a Ata Oficial de Homologação em formato PDF padronizado com %PDF-1.4 (HOM-02).
-        """
-        data_fmt = data_homologacao.strftime("%d/%m/%Y as %H:%M:%S")
+        """Ata Oficial de Homologação em PDF."""
 
-        linhas_titulares = "\n".join([
-            f"  [{t['posicao']:02d}] {t['nome_estudante']} (Matricula: {t.get('matricula') or '-'}) - Curso: {t['curso']} | Nota: {float(t['nota_merito']):.2f} | Protocolo: {t['protocolo']}"
-            for t in titulares
-        ]) or "  Nenhum candidato contemplado."
+        def _linha(item: Dict[str, Any]) -> str:
+            return (
+                f"  [{item['posicao']:02d}] {item['nome_estudante']} (Matrícula: {item.get('matricula') or '-'})\n"
+                f"       Curso: {item.get('curso') or '-'} | Nota: {float(item['nota_merito']):.2f} | "
+                f"Protocolo: {item['protocolo']}"
+            )
 
-        linhas_suplentes = "\n".join([
-            f"  [{s['posicao']:02d}] {s['nome_estudante']} (Matricula: {s.get('matricula') or '-'}) - Curso: {s['curso']} | Nota: {float(s['nota_merito']):.2f} | Protocolo: {s['protocolo']}"
-            for s in suplentes
-        ]) or "  Nenhum suplente cadastrado."
+        linhas_titulares = "\n".join(_linha(t) for t in titulares) or "  Nenhum candidato contemplado."
+        linhas_suplentes = "\n".join(_linha(s) for s in suplentes) or "  Nenhum suplente."
 
-        corpo_ata = f"""
-================================================================================
-          QUERO - QUADRO UNIVERSITARIO DE ESTAGIOS REMUNERADOS E OPORTUNIDADES
-               PRÓ-REITORIA DE GRADUAÇÃO / GESTÃO ACADÊMICA
-================================================================================
+        corpo = f"""{SEPARADOR}
+{CABECALHO}
+PRÓ-REITORIA DE GRADUAÇÃO
+{SEPARADOR}
 
-               ATA OFICIAL DE HOMOLOGAÇÃO DE RESULTADO FINAL
-                              EDITAL #{edital_id}
+ATA DE HOMOLOGAÇÃO DO RESULTADO FINAL - EDITAL #{edital_id}
 
-Titulo: {edital_titulo}
-Data e Hora da Homologacao: {data_fmt} (Horario Oficial de Brasilia)
-Autoridade Homologadora: {homologador_nome}
+Título: {edital_titulo}
+Data e hora da homologação: {_fmt(data_homologacao)} (horário de Brasília)
+Autoridade homologadora: {homologador_nome}
 
-DESPACHO ADMINISTRATIVO:
+DESPACHO:
 "{despacho}"
 
---------------------------------------------------------------------------------
+{LINHA}
 QUADRO I - CANDIDATOS CONTEMPLADOS
---------------------------------------------------------------------------------
+{LINHA}
 {linhas_titulares}
 
---------------------------------------------------------------------------------
-QUADRO II - BANCO DE SUPLENTES
---------------------------------------------------------------------------------
+{LINHA}
+QUADRO II - CADASTRO DE RESERVA (SUPLENTES)
+{LINHA}
 {linhas_suplentes}
 
---------------------------------------------------------------------------------
-TERMO DE HOMOLOGAÇÃO E ENCERRAMENTO:
-O presente documento oficializa de forma imutavel o encerramento do processo
-seletivo regulamentado pelo presente Edital nos termos do Documento de Projeto v5.0.
-================================================================================
+{LINHA}
+TERMO DE HOMOLOGAÇÃO E ENCERRAMENTO
+O presente documento homologa o resultado final e encerra o processo seletivo
+regido pelo Edital #{edital_id}.
+{SEPARADOR}
 """
-        corpo_escaped = (
-            corpo_ata.replace("\\", "\\\\")
-            .replace("(", "\\(")
-            .replace(")", "\\)")
-            .encode("latin-1", errors="replace")
-            .decode("latin-1")
-        )
+        return build_text_pdf(corpo, footer=f"Ata de Homologação - Edital #{edital_id}")
 
-        stream_content = f"BT /F1 9 Tf 36 760 Td 13 TL\n"
-        for linha in corpo_escaped.split("\n"):
-            stream_content += f"({linha}) '\n"
-        stream_content += "ET"
-        stream_bytes = stream_content.encode("latin-1", errors="replace")
-        stream_len = len(stream_bytes)
+    @staticmethod
+    def gerar_comprovante_inscricao_pdf(
+        protocolo: str,
+        edital_id: int,
+        edital_titulo: str,
+        nome: str,
+        matricula: Optional[str],
+        curso: Optional[str],
+        cr: Optional[Decimal],
+        data_submissao: datetime,
+        data_retificacao: Optional[datetime],
+        situacao: str,
+        documentos: List[str],
+    ) -> bytes:
+        docs = "\n".join(f"  - {d}" for d in documentos) or "  (nenhum documento anexado)"
+        retificacao = f"\nÚltima retificação: {_fmt(data_retificacao)}" if data_retificacao else ""
+        corpo = f"""{SEPARADOR}
+{CABECALHO}
+{SEPARADOR}
 
-        header_bytes = b"%PDF-1.4\n%\xe2\xe3\xcf\xd3\n"
-        stream_obj = (
-            f"1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n"
-            f"2 0 obj\n<< /Type /Pages /Kids [3 0 R] /Count 1 >>\nendobj\n"
-            f"3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] /Resources << /Font << /F1 4 0 R >> >> /Contents 5 0 R >>\nendobj\n"
-            f"4 0 obj\n<< /Type /Font /Subtype /Type1 /BaseFont /Courier >>\nendobj\n"
-            f"5 0 obj\n<< /Length {stream_len} >>\nstream\n"
-        ).encode("ascii") + stream_bytes + b"\nendstream\nendobj\n"
+COMPROVANTE DE INSCRIÇÃO
 
-        trailer_bytes = (
-            f"xref\n0 6\n0000000000 65535 f \n"
-            f"trailer\n<< /Size 6 /Root 1 0 R >>\nstartxref\n{len(header_bytes) + len(stream_obj)}\n%%EOF"
-        ).encode("ascii")
+Protocolo: {protocolo}
+Edital: #{edital_id} - {edital_titulo}
+Candidato(a): {nome}
+Matrícula: {matricula or "-"}
+Curso: {curso or "-"}
+CR considerado: {float(cr or 0):.2f}
+Data/hora da inscrição: {_fmt(data_submissao)} (horário de Brasília){retificacao}
+Situação na emissão: {situacao}
 
-        return header_bytes + stream_obj + trailer_bytes
+Documentos enviados:
+{docs}
+
+{LINHA}
+Documento emitido eletronicamente em {_fmt()}.
+A autenticidade pode ser verificada junto à Pró-Reitoria pelo número de protocolo.
+{SEPARADOR}
+"""
+        return build_text_pdf(corpo, font_size=10, leading=14, footer=f"Comprovante {protocolo}")

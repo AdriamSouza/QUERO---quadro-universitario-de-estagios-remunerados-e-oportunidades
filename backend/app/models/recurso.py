@@ -2,7 +2,7 @@ from sqlalchemy import (
     Column, Integer, String, Text, TIMESTAMP, ForeignKey, func
 )
 from sqlalchemy.orm import relationship
-from app.models.base import Base
+from app.models.base import Base, loaded_relationship
 
 
 class Recurso(Base):
@@ -22,3 +22,28 @@ class Recurso(Base):
     inscricao = relationship("Inscricao", back_populates="recurso")
     arquivo_anexo = relationship("Arquivo")
     julgador = relationship("Usuario", foreign_keys=[julgado_por])
+
+    def _insc(self):
+        return loaded_relationship(self, "inscricao")
+
+    @property
+    def protocolo(self):
+        insc = self._insc()
+        return insc.protocolo if insc else None
+
+    @property
+    def nome_estudante(self):
+        insc = self._insc()
+        return insc.nome_estudante if insc else None
+
+    @property
+    def nota_original(self):
+        insc = self._insc()
+        av = loaded_relationship(insc, "avaliacao") if insc else None
+        return av.nota_merito if av else None
+
+    @property
+    def avaliador_original_id(self):
+        insc = self._insc()
+        av = loaded_relationship(insc, "avaliacao") if insc else None
+        return av.avaliador_id if av else None

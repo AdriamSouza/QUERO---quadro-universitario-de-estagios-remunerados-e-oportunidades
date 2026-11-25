@@ -1,4 +1,6 @@
 import { apiClient } from './client';
+import { saveBlob } from '../utils/format';
+import { Edital } from '../types/edital';
 
 export interface AtaHomologacaoResponse {
   id: number;
@@ -13,43 +15,43 @@ export interface AtaHomologacaoResponse {
 
 export interface AuditLog {
   id: number;
-  usuario_id?: number;
+  usuario_id?: number | null;
   acao: string;
   entidade: string;
   entidade_id: number;
-  dados_antes?: any;
-  dados_depois?: any;
-  ip_origem?: string;
+  dados_antes?: Record<string, unknown> | null;
+  dados_depois?: Record<string, unknown> | null;
+  ip_origem?: string | null;
   criado_em: string;
 }
 
 export const executeFinalHomologation = async (editalId: number, justificativa?: string): Promise<AtaHomologacaoResponse> => {
-  const response = await apiClient.post<AtaHomologacaoResponse>(`/editais/${editalId}/homologar-final`, {
-    justificativa,
-  });
+  const response = await apiClient.post<AtaHomologacaoResponse>(`/editais/${editalId}/homologar-final`, { justificativa });
   return response.data;
 };
 
-export const returnForAdjustments = async (editalId: number, justificativa: string): Promise<any> => {
-  const response = await apiClient.post(`/editais/${editalId}/devolver-ajustes`, {
-    justificativa,
-  });
+export const returnForAdjustments = async (editalId: number, justificativa: string): Promise<Edital> => {
+  const response = await apiClient.post<Edital>(`/editais/${editalId}/devolver-ajustes`, { justificativa });
   return response.data;
+};
+
+export const downloadAtaPdf = async (editalId: number): Promise<void> => {
+  const response = await apiClient.get(`/editais/${editalId}/ata-pdf`, { responseType: 'blob' });
+  saveBlob(response.data, `ata_homologacao_edital_${editalId}.pdf`, 'application/pdf');
+};
+
+export const downloadFolhaCsv = async (editalId: number): Promise<void> => {
+  const response = await apiClient.get(`/editais/${editalId}/folha-csv`, { responseType: 'blob' });
+  saveBlob(response.data, `lista_aprovados_edital_${editalId}.csv`, 'text/csv;charset=utf-8');
 };
 
 export const fetchAuditLogs = async (
   entidade?: string,
-  entidadeId?: number,
   skip: number = 0,
   limit: number = 50
 ): Promise<{ items: AuditLog[]; total: number }> => {
   const response = await apiClient.get('/auditoria', {
-    params: {
-      entidade: entidade || undefined,
-      entidade_id: entidadeId || undefined,
-      skip,
-      limit,
-    },
+    params: { entidade: entidade || undefined, skip, limit },
   });
   return response.data;
 };

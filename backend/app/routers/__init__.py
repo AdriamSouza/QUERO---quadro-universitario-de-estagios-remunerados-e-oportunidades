@@ -7,6 +7,7 @@ from app.routers.avaliacao import router as avaliacao_router
 from app.routers.homologacao import router as homologacao_router
 from app.routers.auditoria import router as auditoria_router
 from app.routers.notificacao import router as notificacao_router
+from app.routers.usuarios import router as usuarios_router
 
 __all__ = [
     "health_router",
@@ -18,4 +19,5 @@ __all__ = [
     "homologacao_router",
     "auditoria_router",
     "notificacao_router",
+    "usuarios_router",
 ]

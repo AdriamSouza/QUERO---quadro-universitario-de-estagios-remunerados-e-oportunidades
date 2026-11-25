@@ -1,74 +1,42 @@
-from fastapi import APIRouter, Depends, Request, Response, status, HTTPException
-from fastapi.responses import StreamingResponse
-from sqlalchemy.ext.asyncio import AsyncSession
+from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import joinedload
-import io
 
 from app.core.database import get_db
 from app.core.security import require_roles
-from app.core.storage import get_storage_service
 from app.models.homologacao import AtaHomologacao
-from app.models.inscricao import Arquivo
+from app.routers._download import stream_arquivo
 
 router = APIRouter(tags=["Atas e Exportações"])
 
 
-@router.get("/editais/{id}/ata-pdf")
-async def download_ata_oficial_pdf(
-    id: int,
-    db: AsyncSession = Depends(get_db)
-):
-    """
-    Download público da Ata Oficial de Homologação em formato PDF padronizado (v5.0 HOM-02).
-    """
-    res = await db.execute(
+async def _ultima_ata(db: AsyncSession, edital_id: int, relacao) -> AtaHomologacao:
+    ata = (await db.execute(
         select(AtaHomologacao)
-        .where(AtaHomologacao.edital_id == id)
-        .options(joinedload(AtaHomologacao.arquivo_pdf))
+        .where(AtaHomologacao.edital_id == edital_id)
+        .options(joinedload(relacao))
         .order_by(AtaHomologacao.id.desc())
-    )
-    ata = res.scalar_one_or_none()
-    if not ata or not ata.arquivo_pdf:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Ata de homologação não disponível para este edital.")
+        .limit(1)
+    )).scalars().first()
+    if not ata:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="O resultado final deste edital ainda não foi homologado.")
+    return ata
 
-    storage = get_storage_service()
-    stream = storage.get_file_stream(ata.arquivo_pdf.chave)
 
-    return StreamingResponse(
-        stream,
-        media_type="application/pdf",
-        headers={
-            "Content-Disposition": f'attachment; filename="ata_homologacao_edital_{id}.pdf"',
-        }
-    )
+@router.get("/editais/{id}/ata-pdf")
+async def download_ata_oficial_pdf(id: int, db: AsyncSession = Depends(get_db)):
+    """Ata de homologação em PDF (documento público - HOM-02)."""
+    ata = await _ultima_ata(db, id, AtaHomologacao.arquivo_pdf)
+    return await stream_arquivo(ata.arquivo_pdf.chave, f"ata_homologacao_edital_{id}.pdf", "application/pdf")
 
 
 @router.get("/editais/{id}/folha-csv")
 async def download_folha_csv(
     id: int,
-    db: AsyncSession = Depends(get_db)
+    current_user: dict = Depends(require_roles(["PRO_REITOR"])),
+    db: AsyncSession = Depends(get_db),
 ):
-    """
-    Download da lista oficial final de aprovados em formato CSV (v5.0 HOM-02).
-    """
-    res = await db.execute(
-        select(AtaHomologacao)
-        .where(AtaHomologacao.edital_id == id)
-        .options(joinedload(AtaHomologacao.arquivo_csv))
-        .order_by(AtaHomologacao.id.desc())
-    )
-    ata = res.scalar_one_or_none()
-    if not ata or not ata.arquivo_csv:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Lista de aprovados em CSV não disponível para este edital.")
-
-    storage = get_storage_service()
-    stream = storage.get_file_stream(ata.arquivo_csv.chave)
-
-    return StreamingResponse(
-        stream,
-        media_type="text/csv",
-        headers={
-            "Content-Disposition": f'attachment; filename="lista_aprovados_edital_{id}.csv"',
-        }
-    )
+    """Lista final em CSV com dados pessoais (restrita à Pró-Reitoria - HOM-02)."""
+    ata = await _ultima_ata(db, id, AtaHomologacao.arquivo_csv)
+    return await stream_arquivo(ata.arquivo_csv.chave, f"lista_aprovados_edital_{id}.csv", "text/csv; charset=utf-8")

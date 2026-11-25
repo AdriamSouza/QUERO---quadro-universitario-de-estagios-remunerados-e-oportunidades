@@ -1,4 +1,4 @@
-from pydantic import BaseModel, Field, field_validator
+from pydantic import ConfigDict, BaseModel, Field, field_validator
 from typing import List, Optional, Dict, Any, Union
 from datetime import datetime
 from decimal import Decimal
@@ -18,8 +18,7 @@ class EditalCursoResponse(EditalCursoBase):
     id: int
     edital_id: int
 
-    class Config:
-        from_attributes = True
+    model_config = ConfigDict(from_attributes=True)
 
 
 # --- Documentos Exigidos ---
@@ -37,8 +36,7 @@ class EditalDocumentoExigidoResponse(EditalDocumentoExigidoBase):
     id: int
     edital_id: int
 
-    class Config:
-        from_attributes = True
+    model_config = ConfigDict(from_attributes=True)
 
 
 # --- Comissão Avaliadora ---
@@ -59,18 +57,17 @@ class ComissaoEditalResponse(BaseModel):
     designado_por: int
     designado_em: datetime
 
-    class Config:
-        from_attributes = True
+    model_config = ConfigDict(from_attributes=True)
 
 
 # --- Edital Base e Create ---
 class EditalCreate(BaseModel):
-    titulo: str = Field(..., max_length=200, examples=["Edital 01/2026 - Seleção de Monitoria e Iniciação Científica"])
+    titulo: str = Field(..., min_length=5, max_length=200, examples=["Edital 01/2026 - Seleção de Monitoria e Iniciação Científica"])
     descricao: str = Field(..., examples=["Processo seletivo para preenchimento de bolsas de desenvolvimento acadêmico."])
     categoria: str = Field(..., examples=["ESTAGIO", "MONITORIA", "BOLSA"])
     modalidade: str = Field(..., max_length=50, examples=["Presencial", "Híbrido", "Remoto"])
     valor_bolsa: Decimal = Field(..., ge=0, examples=[700.00])
-    carga_horaria_semanal: int = Field(..., gt=0, examples=[20])
+    carga_horaria_semanal: int = Field(..., gt=0, le=44, examples=[20])
     vagas: int = Field(..., gt=0, examples=[5])
     cr_minimo: Decimal = Field(..., ge=0, le=10, examples=[6.00])
     prazo_recurso_horas: int = Field(48, gt=0, examples=[48])
@@ -127,15 +124,15 @@ class EditalCreate(BaseModel):
 
 
 class EditalUpdate(BaseModel):
-    titulo: Optional[str] = None
-    descricao: Optional[str] = None
+    titulo: Optional[str] = Field(None, min_length=5, max_length=200)
+    descricao: Optional[str] = Field(None, min_length=10)
     categoria: Optional[str] = None
-    modalidade: Optional[str] = None
-    valor_bolsa: Optional[Decimal] = None
-    carga_horaria_semanal: Optional[int] = None
-    vagas: Optional[int] = None
-    cr_minimo: Optional[Decimal] = None
-    prazo_recurso_horas: Optional[int] = None
+    modalidade: Optional[str] = Field(None, max_length=50)
+    valor_bolsa: Optional[Decimal] = Field(None, ge=0)
+    carga_horaria_semanal: Optional[int] = Field(None, gt=0, le=44)
+    vagas: Optional[int] = Field(None, gt=0)
+    cr_minimo: Optional[Decimal] = Field(None, ge=0, le=10)
+    prazo_recurso_horas: Optional[int] = Field(None, gt=0)
     criterios_pontuacao: Optional[Union[Dict[str, Any], List[Any]]] = None
     criterios_desempate: Optional[List[str]] = None
     data_inicio_inscricao: Optional[datetime] = None
@@ -143,6 +140,13 @@ class EditalUpdate(BaseModel):
     data_inicio_avaliacao: Optional[datetime] = None
     data_resultado_preliminar: Optional[datetime] = None
     data_homologacao_final: Optional[datetime] = None
+
+    @field_validator("categoria")
+    @classmethod
+    def validate_categoria(cls, v):
+        if v is not None and v not in ["ESTAGIO", "MONITORIA", "BOLSA"]:
+            raise ValueError("Categoria inválida. Opções: 'ESTAGIO', 'MONITORIA', 'BOLSA'.")
+        return v
 
 
 class EditalCancelarRequest(BaseModel):
@@ -169,14 +173,14 @@ class EditalResponse(BaseModel):
     data_resultado_preliminar: datetime
     data_homologacao_final: datetime
     justificativa_cancelamento: Optional[str] = None
+    data_publicacao_preliminar: Optional[datetime] = None
     criado_por: int
     criado_em: datetime
     cursos: List[EditalCursoResponse] = []
     documentos_exigidos: List[EditalDocumentoExigidoResponse] = []
     comissao: List[ComissaoEditalResponse] = []
 
-    class Config:
-        from_attributes = True
+    model_config = ConfigDict(from_attributes=True)
 
 
 class EditalListResponse(BaseModel):

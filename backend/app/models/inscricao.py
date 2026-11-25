@@ -4,7 +4,7 @@ from sqlalchemy import (
 )
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import relationship
-from app.models.base import Base
+from app.models.base import Base, loaded_relationship
 
 
 class Inscricao(Base):
@@ -35,6 +35,48 @@ class Inscricao(Base):
     arquivos = relationship("Arquivo", back_populates="inscricao", cascade="all, delete-orphan")
     avaliacao = relationship("Avaliacao", back_populates="inscricao", uselist=False, cascade="all, delete-orphan")
     recurso = relationship("Recurso", back_populates="inscricao", uselist=False, cascade="all, delete-orphan")
+
+    @property
+    def nome_estudante(self):
+        est = loaded_relationship(self, "estudante")
+        return est.nome if est else None
+
+    @property
+    def email_estudante(self):
+        est = loaded_relationship(self, "estudante")
+        return est.email if est else None
+
+    @property
+    def matricula_estudante(self):
+        est = loaded_relationship(self, "estudante")
+        return est.matricula if est else None
+
+    @property
+    def titulo_edital(self):
+        ed = loaded_relationship(self, "edital")
+        return ed.titulo if ed else None
+
+    @property
+    def status_edital(self):
+        ed = loaded_relationship(self, "edital")
+        return ed.status if ed else None
+
+    @property
+    def avaliacao_resumo(self):
+        av = loaded_relationship(self, "avaliacao")
+        if not av:
+            return None
+        return {
+            "status": av.status,
+            "parecer": av.parecer,
+            "nota_merito": av.nota_merito,
+            "avaliador_id": av.avaliador_id,
+        }
+
+    @property
+    def recurso_status(self):
+        rec = loaded_relationship(self, "recurso")
+        return rec.status if rec else None
 
 
 class Arquivo(Base):

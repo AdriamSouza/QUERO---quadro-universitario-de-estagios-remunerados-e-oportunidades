@@ -7,6 +7,7 @@ from app.models.recurso import Recurso
 from app.models.homologacao import AtaHomologacao
 from app.models.notificacao import Notificacao
 from app.models.auditoria import AuditoriaLog
+from app.models.arquivo_conteudo import ArquivoConteudo
 
 __all__ = [
     "Base",
@@ -22,4 +23,5 @@ __all__ = [
     "AtaHomologacao",
     "Notificacao",
     "AuditoriaLog",
+    "ArquivoConteudo",
 ]

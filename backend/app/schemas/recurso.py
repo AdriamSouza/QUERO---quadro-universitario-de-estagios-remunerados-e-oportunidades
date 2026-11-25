@@ -1,4 +1,4 @@
-from pydantic import BaseModel, Field, field_validator
+from pydantic import ConfigDict, BaseModel, Field, field_validator
 from typing import Optional
 from datetime import datetime
 from decimal import Decimal
@@ -32,6 +32,9 @@ class RecursoResponse(BaseModel):
     justificativa_decisao: Optional[str] = None
     criado_em: datetime
     julgado_em: Optional[datetime] = None
+    protocolo: Optional[str] = None
+    nome_estudante: Optional[str] = None
+    nota_original: Optional[Decimal] = None
+    avaliador_original_id: Optional[int] = None
 
-    class Config:
-        from_attributes = True
+    model_config = ConfigDict(from_attributes=True)

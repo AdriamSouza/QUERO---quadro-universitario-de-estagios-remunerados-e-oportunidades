@@ -1,75 +1,60 @@
-import io
 import pytest
 from fastapi import HTTPException
-from app.core.storage import LocalStorageService
+
+from app.core.storage import validate_pdf_bytes
 
 
-@pytest.mark.asyncio
-async def test_storage_save_valid_pdf(temp_storage):
-    """Testa salvar um arquivo PDF válido com magic bytes %PDF-."""
+async def _ler(service, chave: str) -> bytes:
+    stream = await service.get_file_stream(chave)
+    return b"".join([chunk async for chunk in stream])
+
+
+async def test_save_and_stream_with_nested_key(temp_storage):
+    service, _ = temp_storage
+    conteudo = b"%PDF-1.4\n" + b"x" * 200_000  # maior que um bloco de 64 KB
+    chave = "editais/1/inscricoes/10/arquivo.pdf"
+
+    await service.save_file_stream(chave, conteudo)
+    assert await _ler(service, chave) == conteudo
+
+
+async def test_csv_keeps_extension(temp_storage):
     service, storage_dir = temp_storage
-    valid_pdf_content = b"%PDF-1.4\n1 0 obj\n<<>>\nendobj\ntrailer\n<<>>\n%%EOF"
-    file_obj = io.BytesIO(valid_pdf_content)
-
-    doc_id = "test-doc-001"
-    saved_path = await service.save(file_obj, doc_id, "documento.pdf")
-
-    assert saved_path is not None
-    assert saved_path.endswith("test-doc-001.pdf")
-
-    # Verifica recuperação
-    retrieved = await service.get(doc_id)
-    assert retrieved is not None
-    content = retrieved.read()
-    retrieved.close()
-    assert content == valid_pdf_content
+    await service.save_file_stream("editais/1/atas/lista.csv", "Nome;Nota\r\nJoão;9.5".encode("utf-8"))
+    assert (await _ler(service, "editais/1/atas/lista.csv")).decode("utf-8").startswith("Nome;Nota")
 
 
-@pytest.mark.asyncio
-async def test_storage_rejects_invalid_magic_bytes(temp_storage):
-    """Testa se arquivos que não iniciam com %PDF- são rejeitados com HTTP 400."""
+async def test_missing_key_raises_file_not_found(temp_storage):
     service, _ = temp_storage
-    invalid_content = b"MZ\x90\x00\x03\x00\x00\x00"  # Executável Windows (MZ)
-    file_obj = io.BytesIO(invalid_content)
-
-    with pytest.raises(HTTPException) as exc_info:
-        await service.save(file_obj, "malicious", "malicious.pdf")
-
-    assert exc_info.value.status_code == 400
-    assert "o documento deve ser um PDF legítimo" in exc_info.value.detail
+    with pytest.raises(FileNotFoundError):
+        await service.get_file_stream("editais/1/nao-existe.pdf")
 
 
-@pytest.mark.asyncio
-async def test_storage_rejects_oversized_file(temp_storage):
-    """Testa se arquivos maiores que 10 MB são rejeitados."""
+@pytest.mark.parametrize("chave", ["../fora.pdf", "editais/../../fora.pdf", "/etc/passwd"])
+async def test_path_traversal_is_blocked(temp_storage, chave):
     service, _ = temp_storage
-    # 10 MB + 1 byte
-    oversized_content = b"%PDF-" + b"0" * (10 * 1024 * 1024 + 10)
-    file_obj = io.BytesIO(oversized_content)
-
-    with pytest.raises(HTTPException) as exc_info:
-        await service.save(file_obj, "large-doc", "large.pdf")
-
-    assert exc_info.value.status_code == 400
-    assert "tamanho máximo" in exc_info.value.detail
+    with pytest.raises(ValueError):
+        await service.save_file_stream(chave, b"%PDF-1.4")
 
 
-@pytest.mark.asyncio
-async def test_storage_delete_compensation(temp_storage):
-    """Testa exclusão compensatória de arquivos (padrão Unit of Work / SAGA)."""
+async def test_delete(temp_storage):
     service, _ = temp_storage
-    valid_pdf_content = b"%PDF-1.7\nExemplo de teste compensatorio"
-    file_obj = io.BytesIO(valid_pdf_content)
+    await service.save_file_stream("a/b.pdf", b"%PDF-1.4")
+    assert await service.delete("a/b.pdf") is True
+    assert await service.delete("a/b.pdf") is False
+    with pytest.raises(FileNotFoundError):
+        await service.get_file_stream("a/b.pdf")
 
-    doc_id = "temp-rollback-doc"
-    await service.save(file_obj, doc_id, "rollback.pdf")
 
-    # Garante que o arquivo existe
-    assert await service.get(doc_id) is not None
+async def test_healthcheck(temp_storage):
+    service, _ = temp_storage
+    assert await service.healthcheck() is True
 
-    # Executa remoção compensatória
-    deleted = await service.delete(doc_id)
-    assert deleted is True
 
-    # Confirma que foi removido
-    assert await service.get(doc_id) is None
+def test_validate_pdf_bytes():
+    validate_pdf_bytes(b"%PDF-1.7 conteudo", "ok.pdf")
+    with pytest.raises(HTTPException) as exc:
+        validate_pdf_bytes(b"MZ\x90\x00", "virus.pdf")
+    assert exc.value.status_code == 422
+    with pytest.raises(HTTPException):
+        validate_pdf_bytes(b"", "vazio.pdf")

@@ -1,225 +1,139 @@
-import React, { useState, useEffect } from 'react';
-import { FileCheck2, Download, Table, CheckCircle2, AlertTriangle, ShieldAlert, Loader2, Undo2 } from 'lucide-react';
+import React, { useEffect, useState } from 'react';
+import { CheckCircle2, Download, FileCheck2, Loader2, Table, Undo2 } from 'lucide-react';
 import { fetchEditais } from '../api/editais';
-import { executeFinalHomologation, returnForAdjustments, AtaHomologacaoResponse } from '../api/homologacao';
-import { apiClient } from '../api/client';
+import { downloadAtaPdf, downloadFolhaCsv, executeFinalHomologation, returnForAdjustments } from '../api/homologacao';
+import { getErrorMessage } from '../api/client';
 import { Edital } from '../types/edital';
+import { EditalSelect, EditalStatusBadge, EmptyState, Modal, PageHeader, btn, inputClass } from '../components/ui';
+import { useToast } from '../components/Toast';
+import { formatDateTime } from '../utils/format';
+
+const FASES = ['EM_RECURSO', 'EM_HOMOLOGACAO_FINAL', 'ENCERRADO'];
 
 export const ExecutiveApprovalPage: React.FC = () => {
+  const toast = useToast();
   const [editais, setEditais] = useState<Edital[]>([]);
-  const [selectedEdital, setSelectedEdital] = useState<Edital | null>(null);
-  const [loading, setLoading] = useState(false);
-  const [despacho, setDespacho] = useState('Homologo o resultado final do processo seletivo em estrita observância às disposições do edital.');
-  const [homologating, setHomologating] = useState(false);
-  const [homologatedInfo, setHomologatedInfo] = useState<AtaHomologacaoResponse | null>(null);
-
-  // Devolver para ajustes
-  const [showDevolverModal, setShowDevolverModal] = useState(false);
-  const [justificativaAjuste, setJustificativaAjuste] = useState('');
-  const [devolvendo, setDevolvendo] = useState(false);
+  const [editalId, setEditalId] = useState<number | null>(null);
+  const [despacho, setDespacho] = useState('Homologo o resultado final do processo seletivo, nos termos do edital.');
+  const [busy, setBusy] = useState(false);
+  const [showDevolver, setShowDevolver] = useState(false);
+  const [justificativa, setJustificativa] = useState('');
 
   useEffect(() => {
-    const load = async () => {
-      try {
-        const res = await fetchEditais();
-        setEditais(res.items);
-        if (res.items.length > 0) {
-          setSelectedEdital(res.items[0]);
-        }
-      } catch (err) {
-        console.error(err);
-      }
-    };
-    load();
+    fetchEditais()
+      .then((res) => {
+        const lista = res.items.filter((e) => FASES.includes(e.status));
+        setEditais(lista);
+        const prioritario = lista.find((e) => e.status === 'EM_HOMOLOGACAO_FINAL') || lista[0];
+        if (prioritario) setEditalId(prioritario.id);
+      })
+      .catch((err) => toast.error(getErrorMessage(err)));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  const handleHomologate = async () => {
-    if (!selectedEdital) return;
-    const confirm = window.confirm(
-      'ATENÇÃO: A homologação do resultado final é um ato formal IRREVOGÁVEL (RN-13). As notas e a classificação serão congeladas definitivamente no sistema. Deseja prosseguir?'
-    );
-    if (!confirm) return;
+  const edital = editais.find((e) => e.id === editalId) || null;
+  const atualizarStatus = (status: string) => setEditais((prev) => prev.map((e) => (e.id === editalId ? { ...e, status } : e)));
 
-    setHomologating(true);
+  const homologar = async () => {
+    if (!edital) return;
+    if (!window.confirm('A homologação é definitiva: a classificação será oficializada e o edital encerrado. Deseja continuar?')) return;
+    setBusy(true);
     try {
-      const res = await executeFinalHomologation(selectedEdital.id, despacho);
-      setHomologatedInfo(res);
-      alert('Edital homologado com sucesso! Ata oficial e listas finais em PDF/CSV geradas.');
-      setSelectedEdital({ ...selectedEdital, status: 'ENCERRADO' });
-    } catch (err: any) {
-      alert(err.response?.data?.detail || 'Erro ao homologar edital.');
+      await executeFinalHomologation(edital.id, despacho.trim());
+      atualizarStatus('ENCERRADO');
+      toast.success('Resultado homologado. A ata e a lista final foram geradas.');
+    } catch (err) {
+      toast.error(getErrorMessage(err));
     } finally {
-      setHomologating(false);
+      setBusy(false);
     }
   };
 
-  const handleDevolverAjustes = async () => {
-    if (!selectedEdital) return;
-    if (justificativaAjuste.trim().length < 15) {
-      alert('A justificativa de devolução para ajustes deve conter pelo menos 15 caracteres (HOM-01).');
-      return;
-    }
-
-    setDevolvendo(true);
+  const devolver = async () => {
+    if (!edital) return;
+    if (justificativa.trim().length < 15) return toast.error('A justificativa deve ter pelo menos 15 caracteres.');
+    setBusy(true);
     try {
-      await returnForAdjustments(selectedEdital.id, justificativaAjuste);
-      alert('Processo devolvido para a comissão examinadora com sucesso (status: EM_AVALIACAO).');
-      setShowDevolverModal(false);
-      setJustificativaAjuste('');
-      setSelectedEdital({ ...selectedEdital, status: 'EM_AVALIACAO' });
-    } catch (err: any) {
-      alert(err.response?.data?.detail || 'Erro ao devolver para ajustes.');
+      await returnForAdjustments(edital.id, justificativa.trim());
+      atualizarStatus('EM_AVALIACAO');
+      toast.success('Processo devolvido à comissão avaliadora.');
+      setShowDevolver(false);
+      setJustificativa('');
+    } catch (err) {
+      toast.error(getErrorMessage(err));
     } finally {
-      setDevolvendo(false);
+      setBusy(false);
     }
   };
 
-  const downloadAtaPdf = () => {
-    if (!selectedEdital) return;
-    window.open(`${apiClient.defaults.baseURL}/editais/${selectedEdital.id}/ata-pdf`, '_blank');
-  };
-
-  const downloadFolhaCsv = () => {
-    if (!selectedEdital) return;
-    window.open(`${apiClient.defaults.baseURL}/editais/${selectedEdital.id}/folha-csv`, '_blank');
-  };
+  const baixar = (fn: (id: number) => Promise<void>) => edital && fn(edital.id).catch((err) => toast.error(getErrorMessage(err)));
 
   return (
     <div className="max-w-6xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
-      <div className="mb-8">
-        <h2 className="text-3xl font-bold text-slate-900 tracking-tight">Homologação Final (Pró-Reitoria)</h2>
-        <p className="mt-2 text-slate-600 text-sm">
-          Ato administrativo formal e imutável que encerra o processo seletivo e oficializa os candidatos contemplados (HOM-01, HOM-02, RN-13).
-        </p>
-      </div>
+      <PageHeader title="Homologação" subtitle="Homologação do resultado final, emissão da ata e exportação da lista de contemplados." />
 
-      {/* Seletor de Edital */}
-      <div className="bg-white p-4 rounded-xl border border-slate-200 shadow-sm mb-6 flex flex-col sm:flex-row items-center justify-between gap-4">
-        <div className="w-full sm:w-auto">
-          <label className="block text-xs font-semibold text-slate-500 mb-1">Selecionar Edital:</label>
-          <select
-            value={selectedEdital?.id || ''}
-            onChange={(e) => {
-              const id = Number(e.target.value);
-              const found = editais.find((item) => item.id === id);
-              setSelectedEdital(found || null);
-            }}
-            className="w-full sm:w-96 py-2 px-3 border border-slate-300 rounded-lg text-sm bg-white font-medium text-slate-800"
-          >
-            {editais.map((e) => (
-              <option key={e.id} value={e.id}>
-                Edital #{e.id} &mdash; {e.titulo} ({e.status})
-              </option>
-            ))}
-          </select>
-        </div>
+      {editais.length === 0 ? (
+        <EmptyState icon={<FileCheck2 className="h-12 w-12" />} title="Nenhum edital em fase de homologação" description="Editais aparecem aqui após a publicação do resultado preliminar." />
+      ) : (
+        <>
+          <EditalSelect editais={editais} value={editalId} onChange={setEditalId} right={edital ? <EditalStatusBadge status={edital.status} /> : undefined} />
 
-        <div className="text-xs text-slate-500 font-medium">
-          Status Atual: <strong className="text-slate-900">{selectedEdital?.status}</strong>
-        </div>
-      </div>
+          {edital && (
+            <section className="bg-white rounded-xl border border-slate-200 p-6 shadow-sm">
+              {edital.status === 'EM_RECURSO' && (
+                <p className="mb-4 text-sm bg-amber-50 border border-amber-200 text-amber-900 rounded-lg p-3">
+                  Prazo de recursos em andamento
+                  {edital.data_publicacao_preliminar
+                    ? ` (encerra em ${formatDateTime(new Date(new Date(edital.data_publicacao_preliminar).getTime() + edital.prazo_recurso_horas * 3600000).toISOString())})`
+                    : ''}
+                  . A homologação fica disponível após o prazo e o julgamento de todos os recursos.
+                </p>
+              )}
 
-      {/* Painel de Decisão do Pró-Reitor */}
-      {selectedEdital && (
-        <div className="bg-white rounded-xl border border-slate-200 p-6 shadow-sm mb-6">
-          <h3 className="text-base font-bold text-slate-900 mb-3 flex items-center">
-            <FileCheck2 className="h-5 w-5 text-blue-600 mr-2" />
-            Despacho e Validação de Encerramento (HOM-01)
-          </h3>
-
-          <div className="mb-4">
-            <label className="block text-xs font-semibold text-slate-700 mb-1">
-              Texto do Despacho Administrativo da Ata:
-            </label>
-            <textarea
-              rows={3}
-              value={despacho}
-              onChange={(e) => setDespacho(e.target.value)}
-              className="w-full p-2.5 border border-slate-300 rounded-lg text-xs focus:ring-2 focus:ring-blue-500"
-            />
-          </div>
-
-          <div className="flex flex-wrap items-center justify-between gap-3 pt-3 border-t border-slate-100">
-            <div className="flex gap-2">
-              <button
-                onClick={downloadAtaPdf}
-                className="px-4 py-2 border border-slate-200 rounded-lg text-xs font-semibold text-slate-700 hover:bg-slate-50 transition flex items-center"
-              >
-                <Download className="h-4 w-4 mr-1.5 text-slate-500" />
-                Baixar Ata Oficial (PDF)
-              </button>
-              <button
-                onClick={downloadFolhaCsv}
-                className="px-4 py-2 border border-slate-200 rounded-lg text-xs font-semibold text-slate-700 hover:bg-slate-50 transition flex items-center"
-              >
-                <Table className="h-4 w-4 mr-1.5 text-slate-500" />
-                Exportar Folha (CSV)
-              </button>
-            </div>
-
-            <div className="flex gap-2">
-              <button
-                onClick={() => setShowDevolverModal(true)}
-                className="px-4 py-2 border border-amber-200 bg-amber-50 rounded-lg text-xs font-semibold text-amber-800 hover:bg-amber-100 transition flex items-center"
-              >
-                <Undo2 className="h-4 w-4 mr-1.5 text-amber-600" />
-                Devolver para Ajustes
-              </button>
-
-              <button
-                onClick={handleHomologate}
-                disabled={homologating || selectedEdital.status === 'ENCERRADO'}
-                className="px-5 py-2 bg-emerald-600 text-white rounded-lg text-xs font-semibold hover:bg-emerald-700 transition flex items-center shadow-sm disabled:opacity-50"
-              >
-                {homologating && <Loader2 className="h-4 w-4 mr-1.5 animate-spin" />}
-                <CheckCircle2 className="h-4 w-4 mr-1.5" />
-                Homologar Resultado Final
-              </button>
-            </div>
-          </div>
-        </div>
+              {edital.status !== 'ENCERRADO' ? (
+                <>
+                  <label className="block text-sm font-semibold text-slate-800 mb-1">Despacho da ata</label>
+                  <textarea rows={3} value={despacho} onChange={(e) => setDespacho(e.target.value)} className={`${inputClass} mb-4`} />
+                  <div className="flex flex-wrap justify-end gap-2">
+                    {edital.status === 'EM_HOMOLOGACAO_FINAL' && (
+                      <button onClick={() => setShowDevolver(true)} disabled={busy} className="inline-flex items-center px-4 py-2 border border-amber-200 bg-amber-50 rounded-lg text-sm font-semibold text-amber-800 hover:bg-amber-100">
+                        <Undo2 className="h-4 w-4 mr-1.5" /> Devolver à comissão
+                      </button>
+                    )}
+                    <button onClick={homologar} disabled={busy || edital.status !== 'EM_HOMOLOGACAO_FINAL'} className={btn.success}>
+                      {busy ? <Loader2 className="h-4 w-4 mr-1.5 animate-spin" /> : <CheckCircle2 className="h-4 w-4 mr-1.5" />} Homologar resultado final
+                    </button>
+                  </div>
+                </>
+              ) : (
+                <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+                  <p className="text-sm text-emerald-800 flex items-center"><CheckCircle2 className="h-5 w-5 mr-2 text-emerald-600" /> Resultado final homologado.</p>
+                  <div className="flex gap-2">
+                    <button onClick={() => baixar(downloadAtaPdf)} className={btn.secondary}><Download className="h-4 w-4 mr-1.5" /> Ata (PDF)</button>
+                    <button onClick={() => baixar(downloadFolhaCsv)} className={btn.secondary}><Table className="h-4 w-4 mr-1.5" /> Lista final (CSV)</button>
+                  </div>
+                </div>
+              )}
+            </section>
+          )}
+        </>
       )}
 
-      {/* Modal Devolver para Ajustes */}
-      {showDevolverModal && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/60 backdrop-blur-sm p-4">
-          <div className="bg-white rounded-2xl shadow-xl max-w-lg w-full border border-slate-200 p-6">
-            <h3 className="text-lg font-bold text-slate-900 mb-1">Devolver para Ajustes (HOM-01)</h3>
-            <p className="text-xs text-slate-500 mb-4">
-              Informe a motivação formal para reabertura de avaliação de mérito pela banca.
-            </p>
-
-            <div className="mb-4">
-              <label className="block text-xs font-semibold text-slate-700 mb-1">
-                Justificativa Obrigatória (mínimo 15 caracteres):
-              </label>
-              <textarea
-                rows={4}
-                value={justificativaAjuste}
-                onChange={(e) => setJustificativaAjuste(e.target.value)}
-                placeholder="Identificada inconformidade procedimental..."
-                className="w-full p-2.5 border border-slate-300 rounded-lg text-xs focus:ring-2 focus:ring-blue-500"
-              />
-            </div>
-
-            <div className="flex justify-end gap-2">
-              <button
-                onClick={() => setShowDevolverModal(false)}
-                className="px-4 py-2 border border-slate-200 rounded-lg text-xs text-slate-700 hover:bg-slate-50"
-              >
-                Cancelar
-              </button>
-              <button
-                onClick={handleDevolverAjustes}
-                disabled={devolvendo}
-                className="px-5 py-2 bg-amber-600 text-white rounded-lg text-xs font-semibold hover:bg-amber-700 flex items-center disabled:opacity-50"
-              >
-                {devolvendo && <Loader2 className="h-3.5 w-3.5 mr-1 animate-spin" />}
-                Confirmar Devolução
-              </button>
-            </div>
-          </div>
-        </div>
+      {showDevolver && (
+        <Modal
+          title="Devolver à comissão avaliadora"
+          subtitle="O edital volta para a fase de avaliação para correções."
+          onClose={() => setShowDevolver(false)}
+          footer={
+            <>
+              <button onClick={() => setShowDevolver(false)} className={btn.secondary}>Cancelar</button>
+              <button onClick={devolver} disabled={busy} className="inline-flex items-center px-4 py-2 bg-amber-600 text-white rounded-lg text-sm font-semibold hover:bg-amber-700">Confirmar devolução</button>
+            </>
+          }
+        >
+          <label className="block text-xs font-semibold text-slate-700 mb-1">Justificativa</label>
+          <textarea rows={4} value={justificativa} onChange={(e) => setJustificativa(e.target.value)} className={inputClass} />
+        </Modal>
       )}
     </div>
   );

@@ -1,134 +1,105 @@
-# QUERO &mdash; Quadro Universitário de Estágios Remunerados e Oportunidades
+# QUERO — Quadro Universitário de Estágios Remunerados e Oportunidades
 
-> **Sistema Unificado de Seleção e Gestão de Estágios, Monitorias e Bolsas Acadêmicas**  
-> Especificação de Requisitos, Modelagem BPMN 2.0, Arquitetura C4 e Engenharia de Software &mdash; **Documento de Projeto Versão 5.0**.
-
----
-
-## 1. Visão Geral e Identidade do Projeto
-
-O **QUERO** centraliza e digitaliza o ciclo completo das seleções acadêmicas universitárias &mdash; publicação de editais, inscrição com upload em streaming de PDFs, homologação formal automática, avaliação de mérito pela comissão examinadora, interposição e julgamento de recursos, homologação final imutável e geração de atas e folhas de pagamento em PDF/CSV.
-
-### Problemas Solucionados
-- **Falta de visibilidade:** O estudante acompanha em tempo real suas candidaturas, notas e resultados pelo painel único do discente.
-- **Conferência manual eliminada:** Validação síncrona de vínculo, curso e CR congelado junto ao Sistema Acadêmico (RN-02).
-- **Rastreabilidade total:** Trilha de auditoria imutável (*append-only*) em conformidade com a LGPD (RN-14).
+> Sistema de seleção e gestão de estágios, monitorias e bolsas acadêmicas.
+> Especificação completa em [`docs/`](docs/) (Documento de Projeto v5.0).
 
 ---
 
-## 2. Pilha Tecnológica (Stack)
+## 1. Visão geral
 
-- **Frontend:** TypeScript, React 18, Vite, Tailwind CSS, Lucide Icons.
-- **Backend:** Python 3.12+, FastAPI, SQLAlchemy 2.0 (AsyncIO), Alembic, Pydantic v2.
-- **Banco de Dados:** PostgreSQL 16 (banco relacional único com sequências atômicas e índices estratégicos).
-- **Armazenamento de Arquivos:** `ArmazenamentoDisco` com interface desacoplada compatível com S3 (gravação e leitura em streaming de blocos de 64 KB, limite de 10 MB e validação mágica `%PDF-`).
-- **Infraestrutura e Deploy:** Docker Compose para desenvolvimento local; `render.yaml` pronto para deploy automatizado no **Render**.
+O **QUERO** digitaliza o ciclo das seleções acadêmicas: publicação de editais, inscrição com envio de documentos em PDF, conferência pela Pró-Reitoria, avaliação de mérito pela comissão, resultado preliminar, recursos, homologação final com ata em PDF e lista de contemplados em CSV.
 
----
+### Perfis
 
-## 3. Modelo de Dados e Arquitetura (v5.0)
+| Perfil | Como obtém acesso | O que faz |
+|---|---|---|
+| **Estudante** | Cadastro próprio na tela *Entrar › Cadastrar* | Inscreve-se, substitui documentos no prazo, acompanha a situação, interpõe recurso |
+| **Avaliador(a)** | Cadastrado pela Pró-Reitoria em *Usuários* | Avalia candidaturas dos editais em que integra a comissão, julga recursos |
+| **Pró-Reitoria** | Conta da carga inicial ou cadastrada por outro gestor | Cria e publica editais, designa comissões, analisa inscrições, homologa resultados, consulta auditoria |
 
-O banco de dados relacional é composto estritamente pelas **12 tabelas canônicas** especificadas no §10 do Documento de Projeto v5.0:
+### Fluxo do edital
 
-1. `usuarios`: Controle unificado de perfis (`ESTUDANTE`, `AVALIADOR`, `PRO_REITOR`).
-2. `editais`: Editais parametrizados por categoria (`ESTAGIO`, `MONITORIA`, `BOLSA`), cronograma e critérios de desempate.
-3. `edital_cursos`: Cursos de graduação elegíveis por edital.
-4. `edital_documentos_exigidos`: Lista de documentos obrigatórios exigidos em PDF.
-5. `comissao_edital`: Designação formal de avaliadores por edital (bloqueando candidatos do mesmo edital &mdash; RN-07).
-6. `inscricoes`: Candidaturas discentes com protocolo atômico (`QUERO-{edital_id}-{seq}`), dados acadêmicos congelados e estados formais (`PENDENTE_VALIDACAO_VINCULO`, `HOMOLOGADA`, `INDEFERIDA`, `DESISTENTE`).
-7. `arquivos`: Metadados e chaves lógicas de PDFs armazenados com hash SHA-256 e status de integridade.
-8. `avaliacoes`: Notas de mérito (0,00 a 10,00), pareceres (`DEFERIDO`/`INDEFERIDO`), justificativas e declaração de não-impedimento (RN-07, RN-08).
-9. `recursos`: Interposição de recursos em janela regulamentar e julgamento por avaliador distinto (RN-10, RN-11).
-10. `atas_homologacao`: Registro definitivo de encerramento pelo Pró-Reitor com vínculo a arquivos oficiais de ata (PDF) e listas (CSV).
-11. `notificacoes`: Notificações internas aos candidatos sobre mudanças de status e resultados.
-12. `auditoria_logs`: Trilha de auditoria imutável com registro de autor, ação, entidade, data/hora e *diff* de dados (RN-14).
-
----
-
-## 4. Como Executar Localmente
-
-### Opção A: Execução via Docker Compose (Recomendado)
-
-1. Clone o repositório:
-```bash
-git clone <URL_DO_REPOSITORIO>
-cd SistemasInfo
+```
+RASCUNHO → ABERTO → INSCRICOES_ENCERRADAS → EM_AVALIACAO → EM_RECURSO → EM_HOMOLOGACAO_FINAL → ENCERRADO
+                                                     ↑__________ devolução para ajustes __________|
 ```
 
-2. Inicialize o ambiente com o Docker Compose:
+As transições por prazo (fim das inscrições, início da avaliação, fim da janela de recursos) acontecem **automaticamente** e ficam registradas na auditoria. A Pró-Reitoria também pode encerrar as inscrições antecipadamente.
+
+### Dados acadêmicos
+
+Se `ACADEMIC_API_URL` estiver configurada, vínculo, curso e CR são consultados no sistema acadêmico e a inscrição é homologada automaticamente quando cumpre os requisitos. Sem essa integração, o estudante declara curso e CR, e a inscrição fica **Em análise** até a Pró-Reitoria conferir o histórico enviado (página *Inscrições*).
+
+---
+
+## 2. Tecnologias
+
+- **Frontend:** React 18, TypeScript, Vite, Tailwind CSS, Lucide Icons.
+- **Backend:** Python 3.12, FastAPI, SQLAlchemy 2.0 (asyncio), Alembic, Pydantic v2, PyJWT, bcrypt.
+- **Banco:** PostgreSQL 16.
+- **Documentos:** armazenamento configurável: disco local (`STORAGE_BACKEND=local`) ou PostgreSQL (`STORAGE_BACKEND=database`, usado no Render, cujo disco gratuito é apagado a cada deploy).
+
+---
+
+## 3. Executar localmente
+
+### Opção A — Docker Compose
+
 ```bash
+cp .env.example .env            # ajuste INITIAL_USERS_PASSWORD
 docker compose up --build
 ```
 
-3. Acesse os serviços:
-- **Frontend SPA (QUERO):** `http://localhost:3000`
-- **Backend API RESTful:** `http://localhost:8000`
-- **Documentação Interativa (Swagger/OpenAPI):** `http://localhost:8000/docs`
+- Frontend: http://localhost:3000
+- API: http://localhost:8000 (documentação em http://localhost:8000/docs)
 
----
+As migrações rodam na inicialização do backend.
 
-### Opção B: Execução Manual (Sem Docker)
+### Opção B — Manual
 
-#### 1. Backend (FastAPI)
 ```bash
+# Backend
 cd backend
 python -m venv venv
-# Windows:
-.\venv\Scripts\activate
-# Linux/macOS:
-source venv/bin/activate
-
-pip install -r requirements.txt
+source venv/bin/activate        # Windows: .\venv\Scripts\activate
+pip install -r requirements-dev.txt
+cp ../.env.example .env         # ajuste DATABASE_URL/POSTGRES_* e INITIAL_USERS_PASSWORD
 alembic upgrade head
-uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
-```
+uvicorn app.main:app --reload
 
-#### 2. Frontend (React + Vite)
-```bash
+# Frontend
 cd frontend
-npm install
+npm ci
 npm run dev
 ```
 
----
+### Primeiro acesso
 
-## 5. Deploy no Render
+A carga inicial cria as contas `proreitor@faculdade.edu.br` (Pró-Reitoria), `avaliador@faculdade.edu.br` e `estudante@faculdade.edu.br`, sem senha. Na inicialização, o backend atribui o valor de **`INITIAL_USERS_PASSWORD`** a todas as contas que ainda não têm senha. Entre com a conta da Pró-Reitoria, troque a senha (menu do usuário › *Alterar senha*) e cadastre os avaliadores reais em *Usuários*. Contas que não serão usadas podem ser desativadas nessa mesma tela.
 
-O projeto contém o arquivo de infraestrutura como código `render.yaml` pronto para provisionamento automático no Render:
-
-1. Acesse o painel do [Render](https://dashboard.render.com).
-2. Clique em **Blueprints** > **New Blueprint Instance**.
-3. Conecte o repositório GitHub `QUERO - quadro universitario de estagios remunerados e oportunidades`.
-4. O Render detectará o arquivo `render.yaml` e criará automaticamente:
-   - **Banco de Dados PostgreSQL 16 (`quero-db`)**: Serviço de banco gerenciado.
-   - **Web Service Backend (`quero-backend`)**: Aplicação FastAPI com execução automática de migrations do Alembic (`alembic upgrade head`) e armazenamento persistente.
-   - **Static Site Frontend (`quero-frontend`)**: SPA construída via `npm run build` com regras de reescrita de rotas (`/*` &rarr; `/index.html`) conectada ao backend.
-
----
-
-## 6. Publicação no GitHub
-
-Para vincular e enviar o repositório local ao GitHub sob o nome solicitado:
+### Testes
 
 ```bash
-# 1. Crie o repositório no GitHub com o nome:
-# "QUERO - quadro universitario de estagios remunerados e oportunidades"
-
-# 2. No terminal local da pasta do projeto:
-git init
-git add .
-git commit -m "feat: implementacao inicial do sistema QUERO conforme Documento de Projeto v5.0"
-git branch -M main
-
-# 3. Adicione o remote do seu repositório no GitHub:
-git remote add origin https://github.com/<SEU_USUARIO>/QUERO---quadro-universitario-de-estagios-remunerados-e-oportunidades.git
-
-# 4. Envie os commits:
-git push -u origin main
+cd backend && pytest          # testes unitários (storage, PDF/CSV, classificação, segurança)
+cd frontend && npm run typecheck
 ```
 
 ---
 
-## 7. Licença
+## 4. Deploy no Render
 
-Este projeto é desenvolvido para instituições públicas de ensino superior sob licença MIT.
+O `render.yaml` provisiona o banco `quero-db`, a API `quero-backend` e o site `quero-frontend`. A cada push no GitHub o Render refaz o deploy.
+
+1. No painel do Render, abra **quero-backend › Environment** e defina **`INITIAL_USERS_PASSWORD`** (não fica versionada). Sem ela, as contas da carga inicial não conseguem entrar.
+2. Se o frontend tiver outro endereço que não `https://quero-frontend.onrender.com`, ajuste `CORS_ORIGINS` no backend e `VITE_API_BASE_URL` no frontend.
+3. A migração do banco (`alembic upgrade head`) roda automaticamente no start do backend.
+
+Variáveis principais (ver `.env.example`): `JWT_SECRET_KEY` (gerada pelo Render), `STORAGE_BACKEND=database`, `CORS_ORIGINS`, `ALLOW_STUDENT_SIGNUP`, `ACADEMIC_API_URL` (opcional).
+
+> O plano gratuito do Render hiberna o backend após inatividade; o primeiro acesso pode levar até um minuto.
+
+---
+
+## 5. Licença
+
+MIT.
